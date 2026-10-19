@@ -1,0 +1,6 @@
+# 仅发布代码和双语说明 / Publish only code and bilingual documentation.
+/*
+!/.gitignore
+!/podcast2md.py
+!/README.md
+!/PODCAST2MD.md

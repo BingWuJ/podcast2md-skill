@@ -26,3 +26,8 @@ Claude Code / pi 的 Skill：把播客单集链接变成可直接阅读的章节
 ## 安装
 
 把整个目录放进 `~/.claude/skills/` 或 `~/.agents/skills/`（推荐 Junction 共享）即可被自动发现。
+
+## 仓库内容
+
+- `SKILL.md` — Skill 本体（给 AI 助手的说明书）
+- `scripts/` — 配套 CLI 脚本源码：`podcast2md.py`（主脚本）、`README.md` / `PODCAST2MD.md`（安装与完整参数文档，双语）
