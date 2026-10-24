@@ -102,6 +102,23 @@
    python "$env:CAPSWRITER_HOME\podcast2md.py" --help
    ```
 
+安装脚本发现 CapsWriter 目录已有 `podcast2md.py` 时不会覆盖。Skill 仓库更新后，运行时副本会一直停在旧版，必须手动更新：
+
+```powershell
+if (-not $env:CAPSWRITER_HOME) {
+  $env:CAPSWRITER_HOME = [Environment]::GetEnvironmentVariable('CAPSWRITER_HOME', 'User')
+}
+if (-not $env:CAPSWRITER_HOME) { throw 'CAPSWRITER_HOME 未设置，停止' }
+$src = "$env:USERPROFILE\.agents\skills\podcast2md\scripts\podcast2md.py"
+$dest = "$env:CAPSWRITER_HOME\podcast2md.py"
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+Copy-Item -LiteralPath $dest -Destination "$dest.bak-$stamp"
+Copy-Item -LiteralPath $src -Destination $dest -Force
+python $dest --help
+```
+
+成功标志：`--help` 能显示用法，且 `$src` 与 `$dest` 的 SHA256 相同。这一步只复制 CLI，不下载、不转录。
+
 模型压缩包约 800 MB。四个模型文件都在时不要重新下载。
 
 ## 脚本会改哪些目录
@@ -113,7 +130,7 @@
 - 找不到 CapsWriter 时，下载程序包并放到 `D:\iStall\CapsWriter-Offline`；没有 D 盘则放到 `%LOCALAPPDATA%\CapsWriter-Offline`。找到或装完后，把该目录写入用户环境变量 `CAPSWRITER_HOME`。其他终端要重开。
 - 模型缺文件时，只把缺少的文件复制进 `models\Fun-ASR-Nano\Fun-ASR-Nano-GGUF`。不删除该目录。只有缺文件无法补进现有目录时，才把原目录改名为 `Fun-ASR-Nano-GGUF.bak-<时间戳>`，再放入新目录。
 - Skill 目录没有 `SKILL.md` 时，下载仓库到 `%USERPROFILE%\.agents\skills\podcast2md`。已有 Skill 不覆盖。
-- CapsWriter 目录没有 `podcast2md.py` 时复制一份。已有文件不覆盖。
+- CapsWriter 目录没有 `podcast2md.py` 时复制一份。已有文件不覆盖；更新旧 CLI 必须按上面的手动步骤备份后再复制。
 - `%USERPROFILE%\.pi\agent\skills\podcast2md` 或 `%USERPROFILE%\.claude\skills\podcast2md` 不存在时，创建指向 Skill 目录的 Junction。已存在的入口不重建。
 
 `-CheckOnly` 只读取并输出 JSON。它会把当前进程的 PATH 刷新为已经保存的用户和系统 PATH，但不写入 PATH，也不写 `CAPSWRITER_HOME`。不执行 winget、下载、解压、移动、删除、改名、复制或创建 Junction。
