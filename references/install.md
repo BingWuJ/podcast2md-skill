@@ -15,10 +15,24 @@
 
 按顺序做。每一步都先看“成功标志”，没看到就不要进入下一步。不要在变量还是空的时候使用 `$env:CAPSWRITER_HOME`，否则命令会变成 `python "\podcast2md.py"`。
 
-1. 安装 Python 3.12。成功标志：`python -c "import sys; print(sys.executable)"` 打印真实解释器，路径不含 `\WindowsApps\`。
+1. 安装 Python 3.12。新开一个终端再看成功标志：`python -c "import sys; print(sys.executable)"` 打印真实解释器，路径不含 `\WindowsApps\`。
+
+   ```powershell
+   winget install --id Python.Python.3.12 --exact --accept-package-agreements --accept-source-agreements
+   ```
+
 2. 安装 Microsoft Visual C++ 2015–2022 x64 运行库。成功标志：安装程序结束，没有缺少 DLL 的提示。下载地址：<https://aka.ms/vs/17/release/vc_redist.x64.exe>
-3. 安装 FFmpeg Essentials，并确认它进入 PATH。成功标志：新开的 PowerShell 里 `ffmpeg -version` 和 `ffprobe -version` 都能运行。只把压缩包解压、没有把 `bin` 加入 PATH，不算安装完成。
-4. 安装 yt-dlp。成功标志：`yt-dlp --version` 能显示版本。
+3. 安装 FFmpeg Essentials。新开一个终端再看成功标志：`ffmpeg -version` 和 `ffprobe -version` 都能运行。只下载压缩包、没有进入 PATH，不算完成。
+
+   ```powershell
+   winget install --id Gyan.FFmpeg.Essentials --exact --accept-package-agreements --accept-source-agreements
+   ```
+
+4. 安装 yt-dlp。新开一个终端再看成功标志：`yt-dlp --version` 能显示版本。
+
+   ```powershell
+   winget install --id yt-dlp.yt-dlp --exact --accept-package-agreements --accept-source-agreements
+   ```
 5. 先设置 CapsWriter 目录，再下载程序和模型。有 D 盘时用 `D:\iStall\CapsWriter-Offline`，没有就用 `%LOCALAPPDATA%\CapsWriter-Offline`。新开的终端才能看到持久化后的用户变量。
 
    ```powershell
