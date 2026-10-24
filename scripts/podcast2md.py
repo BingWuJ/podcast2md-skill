@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import socket
@@ -146,6 +147,7 @@ def ytdlp_dump_info(url: str, log_path: Path) -> dict:
     try:
         return json.loads(r.stdout.decode("utf-8", "replace"))
     except json.JSONDecodeError as e:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(r.stdout.decode("utf-8", "replace"), encoding="utf-8")
         raise PodError(EX_DOWNLOAD, f"yt-dlp 返回的 JSON 解析失败：{e}；原始输出已存 {log_path}")
 
@@ -504,18 +506,25 @@ def parse_args(argv=None):
 def main(argv=None) -> int:
     args = parse_args(argv)
     port = args.port or read_server_port()
+    out_root = Path(args.out_dir).resolve()
     print(f"输入 URL：{args.url}")
-    print(f"输出根目录：{args.out_dir}｜服务端端口：{port}｜润色：{args.polish}")
+    print(f"输出根目录：{out_root}｜服务端端口：{port}｜润色：{args.polish}")
+    home = os.environ.get("CAPSWRITER_HOME")
+    if not home or Path(home).resolve() != BASE_DIR:
+        shown = home or "未设置"
+        print(f"警告：脚本目录 {BASE_DIR} 与 CAPSWRITER_HOME（{shown}）不一致。实际输出根目录：{out_root}")
+    if out_root != DEFAULT_WORK.resolve():
+        print(f"警告：原件默认集中存放在部署副本 work（{DEFAULT_WORK}）。确认你要改根目录：{out_root}")
 
-    # 前置检查
+    # 前置检查。ffmpeg 缺失必须在下载和拉起服务端之前失败，不能留到转录阶段报成退出码 5。
     if not shutil.which("ffmpeg"):
-        print("警告：ffmpeg 不在 PATH，start_client.exe 文件转录会失败（安装说明见 README.md）")
+        raise PodError(EX_USAGE, "ffmpeg 不在 PATH，先装再跑")
     for exe in (SERVER_EXE, CLIENT_EXE):
         if not exe.exists():
             raise PodError(EX_USAGE, f"缺少 {exe}，请在 CapsWriter-Offline 根目录运行本脚本")
 
-    # 1) 信息 + slug
-    info_log = DEFAULT_WORK / "_podcast2md_info.json"
+    # 1) 信息 + slug。失败时的原始 JSON 落到本次 --out-dir，不写死脚本目录。
+    info_log = out_root / "logs" / "_podcast2md_info.json"
     info = ytdlp_dump_info(args.url, info_log)
     slug = slugify(info.get("title") or "", info.get("id") or args.url)
     out_dir = Path(args.out_dir) / slug
@@ -559,18 +568,19 @@ def main(argv=None) -> int:
     md_text = build_chapters_md(toc, cues, txt_text, args.polish)
     v = verify_chapters(md_text, txt_text)
 
-    (out_dir / "chapters.md").write_text(md_text, encoding="utf-8")
-    toc["slug"] = slug
-    toc["transcript"] = {f"{ext}": audio.with_suffix(ext).name for ext in (".txt", ".srt", ".json")}
-    toc["verify"] = {"body_lines": v["total"], "literal_miss": v["literal_miss"],
-                     "normalized_miss": 0 if v["ok"] else len(v["miss_examples"])}
-    (out_dir / "toc.json").write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # 7) 汇报
+    # 7) 先校验。未通过不写 chapters.md，避免目录里留下下次必须 --force 才能清的坏稿。
     print(f"章节句校验：{v['total']} 行，字面缺失 {v['literal_miss']}，归一化后缺失 {0 if v['ok'] else len(v['miss_examples'])}")
     if not v["ok"]:
         print("缺失示例：" + " ｜ ".join(v["miss_examples"]))
-        raise PodError(EX_SPLIT, "chapters.md 校验未通过：存在 .txt 中找不到的句子（见上方示例）")
+        raise PodError(EX_SPLIT, "章节校验未通过：存在 .txt 中找不到的句子（见上方示例）。未写入 chapters.md")
+    chapter_path = out_dir / "chapters.md"
+    tmp_path = out_dir / "chapters.md.tmp"
+    tmp_path.write_text(md_text, encoding="utf-8")
+    tmp_path.replace(chapter_path)
+    toc["slug"] = slug
+    toc["transcript"] = {f"{ext}": audio.with_suffix(ext).name for ext in (".txt", ".srt", ".json")}
+    toc["verify"] = {"body_lines": v["total"], "literal_miss": v["literal_miss"], "normalized_miss": 0}
+    (out_dir / "toc.json").write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
     print("完成。产物：\n  " + "\n  ".join(str(f) for f in [
         audio, out_dir / "toc.json", audio.with_suffix(".txt"),
         audio.with_suffix(".srt"), audio.with_suffix(".json"), out_dir / "chapters.md"]))

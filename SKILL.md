@@ -1,6 +1,6 @@
 ---
 name: podcast2md
-description: 把播客单集链接转成按章节整理的完整文字稿（本机 CapsWriter-Offline，产出 chapters.md，非摘要）。用户要求转录、转文字稿、整理成文，或按网页目录写成论文式文字稿、摘要卡片时使用。只说转文字稿时不要自动写论文稿。音频、转录和中间产物默认放 $env:CAPSWRITER_HOME\work\<slug>\。用户明确要求把最终论文或摘要另存到安全目录时再复制，不搬动原始转录，不无提示覆盖已有文件。本地无链接音频走 FunASR-Nano。
+description: 把播客单集链接转成按章节整理的完整文字稿（本机 CapsWriter-Offline，产出 chapters.md，非摘要）。用户要求转录、转文字稿、整理成文，或按网页目录写成论文式文字稿、摘要卡片时使用。只说转文字稿时不要自动写论文稿。音频、转录和中间产物默认放在部署副本所在目录的 work\<slug>\。用户明确要求把最终论文或摘要另存到安全目录时再复制，不搬动原始转录，不无提示覆盖已有文件。本地无链接音频走 FunASR-Nano。
 ---
 
 # podcast2md — 播客单集链接 → 章节文字稿
@@ -14,7 +14,7 @@ CapsWriter 目录用 `$env:CAPSWRITER_HOME`。未设置时，以安装脚本 JSO
 ## 定位
 
 - 输入：yt-dlp 支持的播客单集页面或音频直链
-- 输出：`$env:CAPSWRITER_HOME\work\<slug>\chapters.md`——完整转录稿按节目已有章节切分；非摘要、不发明内容
+- 输出：部署副本所在目录的 `work\<slug>\chapters.md`。`$env:CAPSWRITER_HOME` 应指向该部署副本；两者不一致时，以脚本所在目录为准，并查看启动警告。
 - 引擎：本机 CapsWriter-Offline（fun_asr_nano），脚本自动拉起 server/client
 
 ## 运行（用部署副本，必须与 start_server.exe 同目录）
@@ -24,14 +24,14 @@ python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL"
 python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL" --transcribe-timeout 10800
 ```
 
-不要加 `--out-dir`。采集和转录的输出根目录始终用部署副本的默认目录。最终论文或摘要的另存只是复制，不据此改 CLI 根目录。
+默认不要加 `--out-dir`。输出根目录是部署副本所在目录的 `work`。`--out-dir` 只作为逃生口；传入非默认值时，脚本会警告实际根目录已改变。最终论文或摘要的另存仍是复制，不要用这个参数搬走原始音频和转录。
 
 - **部署副本**：必须与 `$env:CAPSWRITER_HOME\start_server.exe` 同目录。改脚本先改仓库版，再复制到该目录；不要写死仓库磁盘位置。
 - 完整参数表、流水线细节、退出码：按需读部署目录的 `PODCAST2MD.md`，或本 Skill 的 `scripts/PODCAST2MD.md`，不要默认整读。
 
 ## 成品目录（默认集中，2026-10-24 修订）
 
-音频、转录和中间产物默认放在 `$env:CAPSWRITER_HOME\work\<slug>\`。转录 CLI 仍不要加 `--out-dir`。这些原件留在该集目录，不搬动、不删除：
+音频、转录和中间产物默认放在部署副本所在目录的 `work\<slug>\`。这些原件留在该集目录，不搬动、不删除：
 
 - `chapters.md`、音频、`.txt` / `.srt` / `.json` / `toc.json`
 
@@ -43,7 +43,7 @@ python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL" --transcribe-timeout 108
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--out-dir` | `$env:CAPSWRITER_HOME\work` | 转录输出根目录始终用部署副本的默认值，不因最终稿另存而改。原件在 `work\<slug>\` |
+| `--out-dir` | 部署副本所在目录的 `work` | 默认不要传。非默认值是逃生口，脚本会警告。最终稿另存不改这个根目录。 |
 | `--force` | 关 | 删除已有单集目录重跑；会丢手动修改 |
 | `--polish` | `off` | `basic` 只是规则去语气词，非模型润色；要忠实原稿用 `off` |
 | `--server-timeout` | 600s | server 拉起等待 |
@@ -55,7 +55,8 @@ python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL" --transcribe-timeout 108
 - server 转录完保持常驻（复用加速下次）；停止走托盘退出。
 - 退出码：3=下载失败，4=server 失败，5=转录失败，6=成品已存在/占用，7=切分或校验失败。
 - 日志：`<out-dir>\_podcast2md_server.log` 和 `<slug>\logs\`。
-- ffmpeg 必须在 PATH，否则 client 转录必失败。
+- ffmpeg 不在 PATH 时，脚本在下载前以退出码 2 停止，不会先下载或拉起服务端。
+- 端口探测只看本机 TCP 能否连通，不能确认对方是 CapsWriter。配置端口通常是 6016；若被其他程序占用，会误判服务已就绪，最后变成退出码 5。先确认该端口属于 `start_server.exe`，或改用与 `config_server.py` 一致的空闲 `--port`。
 - 说话人分离不做；多说话人稿需后处理。
 
 ## 两种交付
