@@ -102,7 +102,7 @@
    python "$env:CAPSWRITER_HOME\podcast2md.py" --help
    ```
 
-安装脚本发现 CapsWriter 目录已有 `podcast2md.py` 时不会覆盖。Skill 仓库更新后，运行时副本会一直停在旧版，必须手动更新：
+安装脚本发现 CapsWriter 目录已有 `podcast2md.py` 时不会覆盖。Skill 仓库更新后，运行时副本会一直停在旧版，必须手动更新。如果从没设置过 `CAPSWRITER_HOME`，要先设一次，否则下面以及所有示例命令里的变量都是空的。部署目录是 `start_server.exe` 所在目录，确认实际路径后再设置，不要猜。设置后重开终端才生效。
 
 ```powershell
 if (-not $env:CAPSWRITER_HOME) {

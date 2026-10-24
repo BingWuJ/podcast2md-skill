@@ -19,14 +19,28 @@ CapsWriter 目录用 `$env:CAPSWRITER_HOME`。未设置时，以安装脚本 JSO
 
 ## 运行（用部署副本，必须与 start_server.exe 同目录）
 
+部署目录就是 `start_server.exe` 所在目录。先确认实际路径，不要猜，也不要在变量为空时执行 `python "$env:CAPSWRITER_HOME\podcast2md.py"`，那会变成 `python "\podcast2md.py"`。
+
+`CAPSWRITER_HOME` 有值时：
+
 ```powershell
 python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL"
 python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL" --transcribe-timeout 10800
 ```
 
+没有值时，先进入部署目录，再用相对路径：
+
+```powershell
+Set-Location '<start_server.exe 所在目录>'
+python .\podcast2md.py "单集URL"
+python .\podcast2md.py "单集URL" --transcribe-timeout 10800
+```
+
+尖括号内容要换成已确认的部署目录，不要原样执行。
+
 默认不要加 `--out-dir`。输出根目录是部署副本所在目录的 `work`。`--out-dir` 只作为逃生口；传入非默认值时，脚本会警告实际根目录已改变。最终论文或摘要的另存仍是复制，不要用这个参数搬走原始音频和转录。
 
-- **部署副本**：必须与 `$env:CAPSWRITER_HOME\start_server.exe` 同目录。改脚本先改仓库版，再复制到该目录；不要写死仓库磁盘位置。
+- **部署副本**：就是 `start_server.exe` 所在目录，`podcast2md.py` 必须放在同一目录。改脚本先改仓库版，再复制到该目录；不要写死仓库磁盘位置。
 - 完整参数表、流水线细节、退出码：按需读部署目录的 `PODCAST2MD.md`，或本 Skill 的 `scripts/PODCAST2MD.md`，不要默认整读。
 
 ## 成品目录（默认集中，2026-10-24 修订）

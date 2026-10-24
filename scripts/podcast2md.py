@@ -510,9 +510,12 @@ def main(argv=None) -> int:
     print(f"输入 URL：{args.url}")
     print(f"输出根目录：{out_root}｜服务端端口：{port}｜润色：{args.polish}")
     home = os.environ.get("CAPSWRITER_HOME")
-    if not home or Path(home).resolve() != BASE_DIR:
-        shown = home or "未设置"
-        print(f"警告：脚本目录 {BASE_DIR} 与 CAPSWRITER_HOME（{shown}）不一致。实际输出根目录：{out_root}")
+    if not home:
+        print(f"警告：CAPSWRITER_HOME 未设置。实际输出根目录：{out_root}")
+        print("[Environment]::SetEnvironmentVariable('CAPSWRITER_HOME','" + str(BASE_DIR) + "','User')")
+        print("上面这行可直接复制。它只写入用户变量，重开终端后生效；本进程不会替你设置。")
+    elif Path(home).resolve() != BASE_DIR:
+        print(f"警告：脚本目录 {BASE_DIR} 与 CAPSWRITER_HOME（{home}）不一致。实际输出根目录：{out_root}")
     if out_root != DEFAULT_WORK.resolve():
         print(f"警告：原件默认集中存放在部署副本 work（{DEFAULT_WORK}）。确认你要改根目录：{out_root}")
 
