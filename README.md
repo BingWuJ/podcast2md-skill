@@ -2,6 +2,8 @@
 
 Claude Code / pi 的 Skill：把播客单集链接变成可直接阅读的章节文字稿。
 
+安装不要只看本页的简介。给人看的步骤、给 Agent 的单段命令、每个依赖的官方链接和通过条件都在 [references/install.md](references/install.md)。Agent 执行 [references/install-agent.ps1](references/install-agent.ps1)，不要自己猜测安装包地址。
+
 ## 它做什么
 
 输入一个 yt-dlp 支持的播客单集链接，自动完成：下载音频 → 本机 CapsWriter-Offline 语音识别 → 按节目已有章节切分 → 产出 `chapters.md`（完整转录稿，非摘要）。
@@ -28,7 +30,7 @@ Claude Code / pi 的 Skill：把播客单集链接变成可直接阅读的章节
 
 ## 安装
 
-把 Skill 安装到 `~/.agents/skills/podcast2md/`，保留 `SKILL.md`、`references/` 和 `scripts/` 的相对目录结构。多个客户端共用时，可让 `~/.claude/skills/podcast2md/`、`~/.pi/agent/skills/podcast2md/` 通过 Junction 指向该唯一源，不必维护多份副本。安装位置与实际加载方式以客户端配置为准。
+先按 [references/install.md](references/install.md) 安装 Python、VC++ 运行库、FFmpeg、yt-dlp、CapsWriter-Offline 和 Fun-ASR-Nano 模型，再安装 Skill。Skill 目录是 `~/.agents/skills/podcast2md/`，必须保留 `SKILL.md`、`references/` 和 `scripts/`。多个客户端共用时，让 `~/.claude/skills/podcast2md/`、`~/.pi/agent/skills/podcast2md/` 通过 Junction 指向该目录，不复制第二份。
 
 ## 仓库内容
 

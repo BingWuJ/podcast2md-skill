@@ -5,6 +5,12 @@ description: 把播客单集链接转成按章节整理的完整文字稿（本�
 
 # podcast2md — 播客单集链接 → 章节文字稿
 
+## 缺依赖时先安装
+
+运行前先检查 `python`、`ffmpeg`、`ffprobe`、`yt-dlp`，以及 `start_server.exe` 所在目录和 Fun-ASR-Nano 的四个模型文件。缺任何一项时，读取 [references/install.md](references/install.md)，只执行其中的 Agent 命令；不要从软件名称猜测下载地址，也不要把 FFmpeg 只下载不解压、不加入 PATH。安装脚本退出码不是 0 时停止，不能声称已安装。
+
+作者本机的 CapsWriter 目录是 `D:\iStall\CapsWriter-Offline`。其他机器以安装脚本 JSON 里的 `capswriter.detail` 为准。
+
 ## 定位
 
 - 输入：yt-dlp 支持的播客单集页面或音频直链
