@@ -2,5 +2,6 @@
 /*
 !/.gitignore
 !/podcast2md.py
+!/build_paper_transcript.py
 !/README.md
 !/PODCAST2MD.md
