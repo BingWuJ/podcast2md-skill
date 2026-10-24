@@ -1,6 +1,6 @@
 ---
 name: podcast2md
-description: 把播客单集链接转成按章节整理的完整文字稿（本机 CapsWriter-Offline，产出 chapters.md，非摘要）。用户要求转录、转文字稿、整理成文，或按网页目录写成论文式文字稿、摘要卡片时使用。只说转文字稿时不要自动写论文稿。音频、转录和中间产物默认放 D:\iStall\CapsWriter-Offline\work\<slug>\。用户明确要求把最终论文或摘要另存到安全目录时再复制，不搬动原始转录，不无提示覆盖已有文件。本地无链接音频走 FunASR-Nano。
+description: 把播客单集链接转成按章节整理的完整文字稿（本机 CapsWriter-Offline，产出 chapters.md，非摘要）。用户要求转录、转文字稿、整理成文，或按网页目录写成论文式文字稿、摘要卡片时使用。只说转文字稿时不要自动写论文稿。音频、转录和中间产物默认放 $env:CAPSWRITER_HOME\work\<slug>\。用户明确要求把最终论文或摘要另存到安全目录时再复制，不搬动原始转录，不无提示覆盖已有文件。本地无链接音频走 FunASR-Nano。
 ---
 
 # podcast2md — 播客单集链接 → 章节文字稿
@@ -9,29 +9,29 @@ description: 把播客单集链接转成按章节整理的完整文字稿（本�
 
 运行前先检查 `python`、`ffmpeg`、`ffprobe`、`yt-dlp`，以及 `start_server.exe` 所在目录和 Fun-ASR-Nano 的四个模型文件。缺任何一项时，读取 [references/install.md](references/install.md)，只执行其中的 Agent 命令；不要从软件名称猜测下载地址，也不要把 FFmpeg 只下载不解压、不加入 PATH。安装脚本退出码不是 0 时停止，不能声称已安装。
 
-作者本机的 CapsWriter 目录是 `D:\iStall\CapsWriter-Offline`。其他机器以安装脚本 JSON 里的 `capswriter.detail` 为准。
+CapsWriter 目录用 `$env:CAPSWRITER_HOME`。未设置时，以安装脚本 JSON 的 `capswriter.detail` 为准，不要写死某一台电脑的磁盘路径。
 
 ## 定位
 
 - 输入：yt-dlp 支持的播客单集页面或音频直链
-- 输出：`D:\iStall\CapsWriter-Offline\work\<slug>\chapters.md`——完整转录稿按节目已有章节切分；非摘要、不发明内容
+- 输出：`$env:CAPSWRITER_HOME\work\<slug>\chapters.md`——完整转录稿按节目已有章节切分；非摘要、不发明内容
 - 引擎：本机 CapsWriter-Offline（fun_asr_nano），脚本自动拉起 server/client
 
 ## 运行（用部署副本，必须与 start_server.exe 同目录）
 
 ```powershell
-python "D:\iStall\CapsWriter-Offline\podcast2md.py" "单集URL"
-python "D:\iStall\CapsWriter-Offline\podcast2md.py" "单集URL" --transcribe-timeout 10800
+python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL"
+python "$env:CAPSWRITER_HOME\podcast2md.py" "单集URL" --transcribe-timeout 10800
 ```
 
 不要加 `--out-dir`。采集和转录的输出根目录始终用部署副本的默认目录。最终论文或摘要的另存只是复制，不据此改 CLI 根目录。
 
-- **源仓库**：`D:\iStall\podcast2md\`（podcast2md.py + README.md + PODCAST2MD.md）。改脚本只改仓库版，改完复制到 `D:\iStall\CapsWriter-Offline\` 部署。
-- 完整参数表、流水线细节、退出码：按需读 `D:\iStall\podcast2md\PODCAST2MD.md`，不要默认整读。
+- **部署副本**：必须与 `$env:CAPSWRITER_HOME\start_server.exe` 同目录。改脚本先改仓库版，再复制到该目录；不要写死仓库磁盘位置。
+- 完整参数表、流水线细节、退出码：按需读部署目录的 `PODCAST2MD.md`，或本 Skill 的 `scripts/PODCAST2MD.md`，不要默认整读。
 
 ## 成品目录（默认集中，2026-10-24 修订）
 
-音频、转录和中间产物默认放在 `D:\iStall\CapsWriter-Offline\work\<slug>\`。转录 CLI 仍不要加 `--out-dir`。这些原件留在该集目录，不搬动、不删除：
+音频、转录和中间产物默认放在 `$env:CAPSWRITER_HOME\work\<slug>\`。转录 CLI 仍不要加 `--out-dir`。这些原件留在该集目录，不搬动、不删除：
 
 - `chapters.md`、音频、`.txt` / `.srt` / `.json` / `toc.json`
 
@@ -43,7 +43,7 @@ python "D:\iStall\CapsWriter-Offline\podcast2md.py" "单集URL" --transcribe-tim
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--out-dir` | `D:\iStall\CapsWriter-Offline\work` | 转录输出根目录始终用此默认值，不因最终稿另存而改。原件在 `work\<slug>\` |
+| `--out-dir` | `$env:CAPSWRITER_HOME\work` | 转录输出根目录始终用部署副本的默认值，不因最终稿另存而改。原件在 `work\<slug>\` |
 | `--force` | 关 | 删除已有单集目录重跑；会丢手动修改 |
 | `--polish` | `off` | `basic` 只是规则去语气词，非模型润色；要忠实原稿用 `off` |
 | `--server-timeout` | 600s | server 拉起等待 |
@@ -64,7 +64,7 @@ python "D:\iStall\CapsWriter-Offline\podcast2md.py" "单集URL" --transcribe-tim
 
 用户明确要论文式、摘要卡片，或按播客网页目录分章节时，再在同一集目录写 `论文式文字稿.md`。先读 [references/paper-transcript.md](references/paper-transcript.md)，再用 `scripts/build_paper_transcript.py` 拼正文。正文不手改识别词。目录只决定怎么切，转录决定能写进摘要的事实。用户随后明确要求把最终论文或摘要另存时，按该参考的步骤 5 复制，不把默认集中存放理解成拒绝所有安全另存。
 
-参照样稿是 `D:\iStall\CapsWriter-Offline\work\XMind_Mango_分活_分圈_分钱_搞_AI\论文式文字稿.md`。学结构，不要把那一集的结论套到别的节目上。
+参照样稿在 `$env:CAPSWRITER_HOME\work\<slug>\论文式文字稿.md`。学结构，不要把别的节目结论套过来。
 
 ## 小宇宙
 
@@ -79,6 +79,6 @@ python "D:\iStall\CapsWriter-Offline\podcast2md.py" "单集URL" --transcribe-tim
 
 ## 本地音频 / 相邻场景分工
 
-- **本地音频文件**（录音、已下载的 mp3/wav，无链接）：不走本 CLI。用 FunASR-Nano：venv `D:\iStall\FunASR-Nano\.venv`，权重 `D:\iStall\model-cache\huggingface\local\Fun-ASR-Nano-2512-hf`；长音频必须分段逐段识别（60s 整段会重复"嗯"），参考 `D:\iStall\FunASR-Nano\work\full_transcribe.py`。
+- **本地音频文件**（录音、已下载的 mp3/wav，无链接）：不走本 CLI。用 FunASR-Nano：venv `<FunASR目录>\.venv`，权重 `<模型缓存>\Fun-ASR-Nano-2512-hf`；长音频必须分段逐段识别（60s 整段会重复"嗯"），参考 `<FunASR目录>\work\full_transcribe.py`。
 - **B站等有字幕的视频**：先探测字幕（`yt-dlp --list-subs`），有 CC/AI 字幕就直接拉字幕成文，不必跑语音转写。
 - 字幕转文章（去时间轴、成文）：那是 srt-translator 工作流，不是本 CLI。播客链接要论文式文字稿时，仍走本 Skill 的论文式交付，不要改去跑 srt-translator。

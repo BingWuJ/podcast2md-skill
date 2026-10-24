@@ -138,9 +138,11 @@ python -c "import sys; print(sys.executable)"
 ffmpeg -version
 ffprobe -version
 yt-dlp --version
+# 把尖括号内容替换成 capswriter.detail 的实际路径，不要原样执行。
 $caps = '<脚本 JSON 的 capswriter.detail>'
+if ($caps -like '<*') { throw '尖括号内容还没替换成实际路径，停止' }
 if (-not $caps) { throw '没有 CapsWriter 目录，停止' }
 python "$caps\podcast2md.py" --help
 ```
 
-安装模式会把 `capswriter.detail` 写入用户变量 `CAPSWRITER_HOME`，但当前终端之外的程序要重开才能读到。变量仍为空时，用 JSON 里的路径，不要执行 `python "\podcast2md.py"`。
+尖括号内容必须替换成实际路径，不是原样执行。安装模式会把 `capswriter.detail` 写入用户变量 `CAPSWRITER_HOME`，但当前终端之外的程序要重开才能读到。变量仍为空时，用 JSON 里的路径，不要执行 `python "\podcast2md.py"`。

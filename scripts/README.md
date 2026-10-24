@@ -27,11 +27,7 @@
 
 - Windows 10/11、Python 3.10+。
 - 安装 [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline/releases) 及它需要的模型和运行库，先确认它能转录音频文件。
-- 安装 `yt-dlp` 和 FFmpeg，并确保能在终端调用。FFmpeg 按[官方说明](https://ffmpeg.org/download.html)安装；`yt-dlp` 可以这样安装：
-
-```powershell
-python -m pip install --upgrade yt-dlp
-```
+- 安装 `yt-dlp` 和 FFmpeg，并确认它们在 PATH 中。安装命令、PATH 和通过条件见 [../references/install.md](../references/install.md)，不要只打开 FFmpeg 官网自己猜。
 
 **2. 放好脚本**
 
@@ -101,11 +97,7 @@ Episode link → Download audio → Transcribe locally → Organize by existing 
 
 - Windows 10/11 and Python 3.10+.
 - Install [CapsWriter-Offline](https://github.com/HaujetZhao/CapsWriter-Offline/releases), along with its required models and runtime dependencies. First, make sure it can transcribe audio files.
-- Install `yt-dlp` and FFmpeg, and make sure both are available from your terminal. Follow the [official instructions](https://ffmpeg.org/download.html) to install FFmpeg. You can install `yt-dlp` with:
-
-```powershell
-python -m pip install --upgrade yt-dlp
-```
+- Install `yt-dlp` and FFmpeg and confirm both are on `PATH`. Commands, PATH setup, and pass conditions are in [../references/install.md](../references/install.md). Do not stop at the generic FFmpeg download page.
 
 **2. Put the script in place**
 

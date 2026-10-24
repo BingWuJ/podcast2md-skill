@@ -25,8 +25,8 @@ Claude Code / pi 的 Skill：把播客单集链接变成可直接阅读的章节
 - yt-dlp、ffmpeg 在 PATH
 - 本机 FunASR-Nano venv（处理本地音频文件时）
 
-> **注意：** `SKILL.md` 中的路径（`D:\iStall\...`）是作者本机的安装位置。
-> 复用此 Skill 请按自己的环境修改对应路径。
+> **注意：** CapsWriter 目录使用 `$env:CAPSWRITER_HOME`，不要抄某一台电脑的固定路径。
+> 安装步骤见 [references/install.md](references/install.md)。
 
 ## 安装
 
