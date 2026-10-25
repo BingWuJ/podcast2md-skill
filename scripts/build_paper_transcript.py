@@ -2,7 +2,11 @@
 """把 chapters.md 和摘要卡片拼成论文式文字稿。不改识别词。"""
 import argparse
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from podcast2md import chapter_body_units, coverage_report, text_units
 
 NUMS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十",
         "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"]
@@ -70,15 +74,17 @@ def parse_chapters(text: str):
 def verify_note(episode_dir: Path) -> str:
     toc = episode_dir / "toc.json"
     if not toc.exists():
-        return "校验结果见转录日志。"
+        return "校验结果见转录日志。旧的包含检查不能证明全文完整。"
     data = json.loads(toc.read_text(encoding="utf-8"))
     verify = data.get("verify") or {}
-    total = verify.get("body_lines")
-    literal = verify.get("literal_miss")
-    normalized = verify.get("normalized_miss")
-    if total is None:
-        return "校验结果见转录日志。"
-    return f"章节句校验 {total} 行，字面缺失 {literal}，归一化后缺失 {normalized}。"
+    if "coverage_ok" not in verify:
+        return "这份转录只有旧校验，不能把包含检查当成全文覆盖通过。"
+    return (
+        f"全文覆盖 {'通过' if verify.get('coverage_ok') else '未通过'}，"
+        f"缺失 {verify.get('missing_count')}，增加 {verify.get('added_count')}，"
+        f"重复 {verify.get('duplicate_count')}，乱序 {verify.get('reordered')}，"
+        f"替换 {verify.get('replaced_count')}。时间轴 {'通过' if verify.get('timeline_ok') else '未通过'}。"
+    )
 
 
 def main():
@@ -140,6 +146,21 @@ def main():
             out.extend(tail)
             out.append("")
 
+    generated = "\n".join(out)
+    body = generated.split("## 正文", 1)[-1]
+    derived = [line for line in text_units(body)
+               if not line.startswith("### ") and "非对谈文本" not in line
+               and line != "（本章无字幕内容）"]
+    report = coverage_report(chapter_body_units(chapters_path.read_text(encoding="utf-8")),
+                             derived, faithful=False)
+    print(
+        "论文正文覆盖："
+        f"缺失 {report['missing_count']}，增加 {report['added_count']}，"
+        f"重复 {report['duplicate_count']}，乱序 {report['reordered']}，"
+        f"替换 {report['replaced_count']}，标点 {report['punctuation_count']}。"
+    )
+    if not report["content_ok"]:
+        raise SystemExit("论文正文没有覆盖章节原稿。未写入论文式文字稿.md")
     dest = episode / "论文式文字稿.md"
     dest.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
     print(f"sections={len(sections)}")

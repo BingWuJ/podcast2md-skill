@@ -10,15 +10,18 @@
 
 ### 它是做什么的？
 
-给它一个播客单集链接，它会下载音频，调用本机的语音识别工具转成文字，再按节目已有的章节整理成一份文档。你可以用来读稿、搜索内容，或者继续做笔记。
+给它一个播客或 B 站单集链接，它先独立探测字幕：有可用轨道就保存原件并按节目已有的章节整理成文档，不下载音频、不跑语音识别；只有确认没有可用轨道（弹幕不算）才下载音频、调用本机语音识别转成文字。你可以用来读稿、搜索内容，或者继续做笔记。
 
 ```text
-单集链接 → 下载音频 → 本机语音转文字 → 按已有章节整理 → chapters.md
+单集链接 → 独立探测字幕 ─┬─ 有可用轨道 → 保存原件 → 按已有章节整理 → chapters.md（来源：普通CC / 平台AI）
+                        └─ 确认无轨道 → 下载音频 → 本机语音转文字 → 按已有章节整理 → chapters.md（来源：本机ASR）
 ```
 
 **得到的是完整转录稿，不是摘要，也不会替你编写节目里没说过的内容。** 语音识别可能听错，重要内容仍需对照音频核实。
 
-> **使用前提：Windows + 已安装的 CapsWriter-Offline。**
+**探测失败不等于没有字幕。** 状态为 `login_required`、`request_failed`、`filter_no_match` 时脚本停止：不写成「确认无字幕」，也不静默改跑语音识别。每次探测结果写在单集目录的 `subtitle-probe.json`。
+
+> **使用前提：Windows + Python 3.10+ + yt-dlp。** 只有走语音识别这条路（确认无可用字幕或本地音频）才需要已安装的 CapsWriter-Offline。
 > 本项目负责把下载、转录和整理串起来，不自带语音识别程序或模型。下载本仓库并不能直接开始转录。
 
 ### 怎么开始？
@@ -83,12 +86,18 @@ AI 助手替你运行命令并检查结果。**自然语言交互由助手提供
 Give it a link to a podcast episode. It downloads the audio, transcribes it using a locally installed speech recognition tool, and organizes the transcript into a document using the episode's existing chapters. You can read the transcript, search its contents, or use it as a starting point for your notes.
 
 ```text
-Episode link → Download audio → Transcribe locally → Organize by existing chapters → chapters.md
+Give it a podcast or Bilibili episode link and it probes subtitles on its own first. If a usable track exists, it saves the original subtitles and organizes them by the episode's existing chapters without downloading audio or running speech recognition. Only after confirming there is no usable track (danmaku does not count) does it download audio and transcribe locally. Use the output to read along, search the content, or keep notes.
+
+```text
+Episode link → Probe subtitles ─┬─ Usable track → Save original → Organize by chapters → chapters.md (普通CC / 平台AI)
+                                └─ Confirmed none → Download audio → Transcribe locally → Organize by chapters → chapters.md (本机ASR)
 ```
 
 **The result is a full transcript, not a summary. It does not invent content that was never said in the episode.** Speech recognition can make mistakes, so check important details against the audio.
 
-> **Requirements: Windows + an existing CapsWriter-Offline installation.**
+**A failed probe is not "no subtitles".** The script stops with `login_required`, `request_failed`, or `filter_no_match`: it never records that as "confirmed none" and never silently falls back to speech recognition. Every probe result is written to `subtitle-probe.json` in the episode directory.
+
+> **Requirements: Windows + Python 3.10+ + yt-dlp.** An existing CapsWriter-Offline installation is needed only on the speech-recognition path (confirmed no subtitles, or local audio).
 > This project connects the download, transcription, and formatting steps. It does not include a speech recognition engine or models. Downloading this repository alone is not enough to start transcribing.
 
 ### How do I get started?

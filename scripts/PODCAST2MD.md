@@ -30,28 +30,29 @@ python .\podcast2md.py --help
 | `--port` | 读 `config_server.py`，失败回退 6016 | 服务端监听探测端口；不会改写 CapsWriter 客户端/服务端配置 |
 | `--server-timeout` | 600 秒 | 拉起 `start_server.exe` 后等待就绪的时长 |
 | `--transcribe-timeout` | 按音频时长计算 | 未传时为 `max(600, 时长×4+120)` 秒。ffprobe 取不到时长或时长为 0 时用 7200 秒。显式传入后不被覆盖。启动时打印音频时长和本次预算 |
+| `--sub-lang` | 不限 | 只接受该语言字幕轨。有其他轨道但没有这一轨时为 `filter_no_match`，停止且不转写 |
 
 `--polish basic` 不是模型润色：规则可能影响有意义的重复字符或数字，也可能因正文校验失败而退出。需要忠实原稿时使用默认 `off`，保留 `.txt` 后再人工或由 AI 助手校对。`--port` 应与现有 CapsWriter 配置一致，不能单靠此参数更改转录服务地址。
 
 ### 流水线
 
-1. **下载**：本机 `yt-dlp -J` 取单集信息（标题、章节、描述），`-f bestaudio/best --write-info-json` 下载音频。
-2. **章节目录**：优先 yt-dlp chapters；否则解析描述中 `M:SS 标题` 时间戳行（至少 2 条）；再尝试单集页 HTML 时间轴区块。全部失败则只放一章「全文」，不发明章节。首章之前的内容并入第一章。HTML 提取是格式相关的尽力回退，不保证任意网站通用。
-3. **转录**：探测本地服务端端口；未运行则拉起 `start_server.exe`，不改引擎配置。启动 `start_client.exe <音频>` 转录，产物齐备后 CLI 代写回车越过「按回车退出」，再等待/终止客户端进程。
-4. **切分**：解析 `.srt`，按条目起点时间归入章节，写入 `chapters.md`。不会在跨章字幕条目内部逐字切分。
-5. **校验**：切章前先核对 srt 与 txt。srt 各条文本归一化后必须是 txt 归一化串的子串，且长度比不得低于 0.99。同目录 `.json` 若有 `tokens`，还核对它与 `timestamps` 数量相同，以及与 txt 的归一化长度比不得低于 0.99。不通过时退出码为 5，不写 `chapters.md`。通过后再检查 `chapters.md` 正文能在 `.txt` 中找到。`toc.json` 记录 srt 字节的 sha1 和字节数；读取已有 toc 时若指纹不一致，只打印警告，不改写该文件，也不自动重跑。json tokens 归一化后还必须是 txt 的子串。
+1. **探测**：`yt-dlp -J` 取标题和章节，再单独运行 `--list-subs`。普通 JSON 字幕字段为空不是结论。弹幕不算字幕。状态写入 `subtitle-probe.json`。
+2. **有可用轨道**：保存字幕原件到 `original-subs/`，生成 `chapters.md`，不下载音频、不转写。来源标为 `普通CC` 或 `平台AI`。
+3. **确认无可用轨道**：才下载音频并走 CapsWriter，来源标为 `本机ASR`。需登录、请求失败、筛选无匹配都停止，不回退 ASR，也不写成确认无字幕。
+4. **章节目录**：优先 yt-dlp chapters；否则解析描述中 `M:SS 标题` 时间戳行（至少 2 条）；再尝试单集页 HTML 时间轴区块。全部失败则只放一章「全文」，不发明章节。首章之前的内容并入第一章。HTML 提取是格式相关的尽力回退，不保证任意网站通用。
+5. **切分**：解析字幕，按条目起点时间归入章节。无效时间戳单列为「未定位文本」，不伪造时间，不丢文字。不会在跨章字幕条目内部逐字切分。
+6. **校验**：按条目原有顺序做全文覆盖，报告漏段、增加、重复、乱序、替换和标点改动。某一句能在原稿找到不能单独放行。未通过不写 `chapters.md`。本机 ASR 仍先核对 srt 与 txt：归一化后 srt 必须是 txt 的子串，且长度比不得低于 0.99。同目录 `.json` 若有 `tokens`，才核对数量和长度比；字段不适用不算失败。`toc.json` 记录原件 sha1；指纹不一致只警告，不自动重跑。
 
 ### 成品目录 `<输出根目录>/<slug>/`
 
 ```text
-<slug>.<ext>           下载的音频
-<slug>.info.json       yt-dlp 单集信息
-<slug>.txt             CapsWriter 原文
-<slug>.srt             CapsWriter 字幕
-<slug>.json            CapsWriter 时间戳数据
-toc.json               章节目录、来源、校验摘要
+original-subs/         平台字幕原件（有可用轨道时）
+subtitle-probe.json    探测状态；不是确认无字幕的替代结论
+<slug>.<ext>           仅 ASR 路径下载的音频
+<slug>.txt/.srt/.json  仅 ASR 路径的 CapsWriter 产物
+toc.json               章节目录、文字来源、覆盖校验
 chapters.md            按章节整理的文字稿
-logs/                  yt-dlp、客户端日志
+logs/                  yt-dlp、探测和客户端日志
 ```
 
 服务端日志位于输出根目录的 `_podcast2md_server.log`，不在单集目录内。
@@ -105,16 +106,18 @@ Existing output is protected by default. **`--force` deletes the existing episod
 | `--port` | Read from `config_server.py`, falling back to 6016 | Port used to probe the server; does not rewrite CapsWriter client or server configuration |
 | `--server-timeout` | 600 seconds | Maximum wait for the launched server to become ready |
 | `--transcribe-timeout` | Computed from duration | When omitted, `max(600, duration×4+120)` seconds. Falls back to 7200 if ffprobe cannot read a positive duration. An explicit value is never overridden. Startup prints duration and the budget used |
+| `--sub-lang` | Any | Accept only this subtitle language. Other tracks without this one yield `filter_no_match` and stop without ASR |
 
 `--polish basic` is not model-based editing. Its rules can affect meaningful repeated characters or digits, and the result may fail transcript validation. For a faithful source transcript, keep the default `off` and proofread a copy of the `.txt` file manually or with an AI assistant. `--port` must match the existing CapsWriter setup; this flag alone cannot change the transcription service address.
 
 ### Pipeline
 
-1. **Download:** run `yt-dlp -J` to retrieve episode metadata, then download audio with `-f bestaudio/best --write-info-json`.
-2. **Chapter outline:** prefer yt-dlp chapters, then description timestamp lines such as `M:SS Title` (at least two entries), then an HTML timeline. If none is available, use a single full-transcript chapter. Content before the first chapter is included in that chapter. HTML extraction is format-dependent and best-effort.
-3. **Transcribe:** probe the local server port and launch `start_server.exe` if needed without changing its engine configuration. Invoke `start_client.exe <audio>`. Once the output files are ready, send a newline to dismiss the exit prompt, then wait for or terminate the client process.
-4. **Segment:** parse `.srt` and assign each cue to a chapter using its start time. Cues crossing a chapter boundary are not split character by character.
-5. **Validate:** before splitting chapters, the normalized subtitle cues must be a substring of the normalized `.txt`, with a length ratio of at least 0.99. If the CapsWriter `.json` has `tokens`, its count must equal `timestamps` and its normalized length ratio against `.txt` must also be at least 0.99. Failure exits with code 5 and does not write `chapters.md`. `toc.json` stores the srt sha1 and byte count. An existing toc with a different fingerprint only prints a warning; the file is not rewritten and the run is not repeated. Normalized json tokens must also be a substring of the txt.
+1. **Probe:** run `yt-dlp -J`, then `--list-subs` independently. An empty JSON subtitle field is not a verdict. Danmaku is not a subtitle. Status goes to `subtitle-probe.json`.
+2. **Usable track:** save the original subtitle under `original-subs/`, write `chapters.md`, and do not transcribe. Label it `普通CC` or `平台AI`.
+3. **Confirmed none:** only then download audio and run CapsWriter, labeled `本机ASR`. Login required, request failure, and filter mismatch stop the run. They are not “no subtitles” and do not fall back to ASR.
+4. **Chapter outline:** prefer yt-dlp chapters, then description timestamps, then an HTML timeline. Otherwise use one full chapter. HTML extraction is best-effort.
+5. **Segment:** assign cues by start time. Invalid timestamps stay in source order and are not invented or dropped.
+6. **Validate:** full ordered coverage must pass. Containment alone cannot pass. ASR still checks the srt/txt contract and, only when present, json token fields. A fingerprint mismatch warns and does not rerun.
 
 ### Output directory: `<output root>/<slug>/`
 

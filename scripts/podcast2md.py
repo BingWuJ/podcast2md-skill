@@ -2,7 +2,7 @@
 """
 podcast2md.py — 播客单集链接转写 CLI（单文件，仅标准库）
 
-流水线：yt-dlp 下载 → CapsWriter-Offline 转录 → 按章节切分 → 交付 chapters.md
+流水线：独立探测字幕 → 有可用轨道则保存原件并生成文字稿；只有确认无可用轨道才下载音频并走 CapsWriter
 安装说明：README.md；使用说明：PODCAST2MD.md
 
 边界：
@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from bisect import bisect_right
+from collections import Counter
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -404,35 +405,62 @@ def parse_srt(path: Path) -> list[dict]:
     return cues
 
 
-def build_chapters_md(toc: dict, cues: list[dict], txt_text: str, polish_mode: str) -> str:
-    """按目录时间把 srt 条目切进章节；无目录时整篇 txt 直接交付"""
+UNLOCATED_NOTE = "以下条目没有可靠时间戳，保留原有顺序，不伪造时间。时间轴未通过。"
+IGNORED_LANGS = {"danmaku", "live_chat"}
+LANG_PREFERENCE = ["zh-hans", "zh-cn", "zh", "chi", "zh-hant", "zh-tw", "zh-hk"]
+
+
+def source_label(kind: str, lang: str | None = None) -> str:
+    """文字来源只使用这三类。语言附在后面，不另造第四类。"""
+    if kind == "平台AI":
+        return f"平台AI（{lang}）" if lang else "平台AI"
+    if kind == "普通CC":
+        return f"普通CC（{lang}）" if lang else "普通CC"
+    return "本机ASR（CapsWriter-Offline / fun_asr_nano）"
+
+
+def build_chapters_md(toc: dict, cues: list[dict], txt_text: str, polish_mode: str,
+                       origin: dict | None = None, unlocated: list[str] | None = None) -> str:
+    """按目录时间把字幕条目切进章节。无效时间的文本单列，不丢、不伪造时间。"""
     status = {"off": "未润色（未检测到本地润色模型，以下为转录原文）",
               "basic": "基础规则润色（仅去语气词与相邻重复；无模型、无云端调用）"}[polish_mode]
     src = {"yt-dlp": "yt-dlp chapters", "description": "页面描述时间戳目录",
            "html": "页面 HTML 时间轴", "none": "无目录，整篇一章"}[toc["source"]]
+    origin = origin or {
+        "text_source": source_label("本机ASR"),
+        "generator": "podcast2md.py（CapsWriter-Offline / fun_asr_nano）",
+        "probe_note": "not_requested",
+    }
     lines = [f"# {toc['title']}", "",
              f"> 来源：{toc['url']}",
-             f"> 生成：podcast2md.py（CapsWriter-Offline / fun_asr_nano）",
+             f"> 文字来源：{origin['text_source']}",
+             f"> 生成：{origin['generator']}",
              f"> 状态：{status}",
-             f"> 章节来源：{src}", ""]
+             f"> 章节来源：{src}",
+             f"> 字幕探测：{origin['probe_note']}",
+             "> 边界：正文与原件一致只说明转换没有丢改，不能证明字幕覆盖整段音频，也不能证明识别准确。普通CC不保证人工校对。",
+             ""]
+    unlocated = [item.strip() for item in (unlocated or []) if item and item.strip()]
+    timed = [cue for cue in cues if isinstance(cue.get("start"), (int, float))]
 
-    if toc["source"] == "none":
+    if toc["source"] == "none" or not timed:
         body = apply_polish(txt_text, polish_mode)
         lines += [f"## {fmt_ts(0)} 全文", "", body.rstrip(), ""]
-        return "\n".join(lines)
-
-    starts = [c["start"] for c in toc["chapters"]]
-    buckets = [[] for _ in toc["chapters"]]
-    for cue in cues:  # 按条目起点归章：start <= cue.start < 下一章 start
-        idx = bisect_right(starts, cue["start"]) - 1
-        buckets[max(0, idx)].append(cue["text"])
-
-    for i, chap in enumerate(toc["chapters"]):
-        end = toc["chapters"][i + 1]["start"] if i + 1 < len(toc["chapters"]) else cues[-1]["end"]
-        chap["end"] = end
-        body = "\n".join("\n".join(b.splitlines()) for b in buckets[i]).strip()
-        body = apply_polish(body, polish_mode) or EMPTY_CHAPTER_MARK
-        lines += [f"## {fmt_ts(chap['start'])} {chap['title']}", "", body, ""]
+    else:
+        starts = [c["start"] for c in toc["chapters"]]
+        buckets = [[] for _ in toc["chapters"]]
+        for cue in timed:  # 按条目起点归章：start <= cue.start < 下一章 start
+            idx = bisect_right(starts, cue["start"]) - 1
+            buckets[max(0, idx)].append(cue["text"])
+        last_end = timed[-1].get("end")
+        for i, chap in enumerate(toc["chapters"]):
+            end = toc["chapters"][i + 1]["start"] if i + 1 < len(toc["chapters"]) else last_end
+            chap["end"] = end
+            body = "\n".join("\n".join(b.splitlines()) for b in buckets[i]).strip()
+            body = apply_polish(body, polish_mode) or EMPTY_CHAPTER_MARK
+            lines += [f"## {fmt_ts(chap['start'])} {chap['title']}", "", body, ""]
+    if unlocated:
+        lines += ["## 未定位文本", "", UNLOCATED_NOTE, "", *unlocated, ""]
     return "\n".join(lines)
 
 
@@ -494,9 +522,9 @@ def missing_preview(left: str, right: str) -> str:
     return left[at:at + 30]
 
 
-def check_srt_txt_contract(cues: list[dict], txt_text: str) -> dict:
+def check_srt_txt_contract(cues: list[dict], txt_text: str, unlocated: list[str] | None = None) -> dict:
     """切章前确认 srt 没有相对 txt 截断。正常产物应完全相等，不是接近。"""
-    srt_norm = normalize("".join(c["text"] for c in cues))
+    srt_norm = normalize("".join(c["text"] for c in cues) + "".join(unlocated or []))
     txt_norm = normalize(txt_text)
     ratio = (len(srt_norm) / len(txt_norm)) if txt_norm else 0.0
     contained = bool(srt_norm) and srt_norm in txt_norm
@@ -505,8 +533,8 @@ def check_srt_txt_contract(cues: list[dict], txt_text: str) -> dict:
             "ratio": ratio, "preview": missing_preview(srt_norm, txt_norm)}
 
 
-def require_srt_txt_contract(cues: list[dict], txt_text: str) -> dict:
-    result = check_srt_txt_contract(cues, txt_text)
+def require_srt_txt_contract(cues: list[dict], txt_text: str, unlocated: list[str] | None = None) -> dict:
+    result = check_srt_txt_contract(cues, txt_text, unlocated)
     if not result["ok"]:
         raise PodError(
             EX_TRANSCRIBE,
@@ -560,7 +588,7 @@ def probe_audio_duration(audio: Path) -> float | None:
         return None
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(audio)],
-        capture_output=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+        capture_output=True, text=True,
     )
     if result.returncode != 0:
         return None
@@ -585,7 +613,7 @@ def srt_fingerprint(path: Path) -> tuple[str, int]:
 
 
 def mark_stale_toc(out_dir: Path) -> None:
-    """已有 toc 与当前 srt 指纹不一致时只打印警告。不改写 toc.json。"""
+    """已有 toc 与当前 srt 指纹不一致时只标记，不重跑转录。"""
     toc_path = out_dir / "toc.json"
     if not toc_path.exists():
         return
@@ -607,33 +635,311 @@ def mark_stale_toc(out_dir: Path) -> None:
     stored = toc.get("source_fingerprint")
     if not isinstance(stored, str) or stored == current:
         return
-    print(f"警告：toc.json 指纹与当前 srt 不一致，不自动重跑，也不改写 toc.json：{srt_path.name}")
+    print(f"警告：toc.json 指纹与当前 srt 不一致，已标记 stale，不自动重跑：{srt_path.name}")
+    toc["stale"] = True
+    toc_path.write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def verify_chapters(md_text: str, txt_text: str) -> dict:
-    """验收核心：chapters.md 的正文句必须能在 .txt 里找到（字面优先，归一化兜底）"""
-    body_lines = [ln for ln in md_text.splitlines()
-                  if ln.strip() and not ln.startswith("#") and not ln.startswith(">")
-                  and ln.strip() != EMPTY_CHAPTER_MARK]
-    txt_norm = normalize(txt_text)
-    miss_literal, miss_all = [], []
-    for ln in body_lines:
-        if ln in txt_text:
+def parse_srt_document(text: str) -> tuple[list[dict], list[str]]:
+    """解析字幕正文。无效时间不丢文本、不伪造时间。parse_srt 的返回签名保持不变。"""
+    cues, unlocated, pending = [], [], []
+    cur = None
+
+    def flush_pending() -> None:
+        nonlocal pending
+        for line in pending:
+            stripped = line.strip()
+            if stripped and not stripped.isdigit():
+                unlocated.append(stripped)
+        pending = []
+
+    for line in text.splitlines():
+        matched = SRT_TIME.search(line)
+        if matched:
+            flush_pending()
+            if cur and cur.get("text") and not cur.get("invalid_time"):
+                cues.append(cur)
+            groups = [int(item) for item in matched.groups()]
+            start = groups[0] * 3600 + groups[1] * 60 + groups[2] + groups[3] / 1000
+            end = groups[4] * 3600 + groups[5] * 60 + groups[6] + groups[7] / 1000
+            cur = {"start": start, "end": end, "text": "", "invalid_time": end < start}
             continue
-        miss_literal.append(ln)
-        if normalize(ln) not in txt_norm:
-            miss_all.append(ln)
-    return {"total": len(body_lines), "literal_miss": len(miss_literal),
-            "miss_examples": miss_all[:5], "ok": not miss_all}
+        stripped = line.strip()
+        if not stripped or stripped.isdigit():
+            continue
+        if cur is None:
+            pending.append(line)
+        elif cur.get("invalid_time"):
+            unlocated.append(stripped)
+        else:
+            cur["text"] += ("\n" if cur["text"] else "") + stripped
+    if cur and cur.get("text") and not cur.get("invalid_time"):
+        cues.append(cur)
+    flush_pending()
+    return [cue for cue in cues if cue.get("text")], unlocated
+
+
+def text_units(*parts: str) -> list[str]:
+    units = []
+    for part in parts:
+        units.extend(line.strip() for line in (part or "").splitlines() if line.strip())
+    return units
+
+
+def chapter_body_units(md_text: str) -> list[str]:
+    ignored = {EMPTY_CHAPTER_MARK, UNLOCATED_NOTE}
+    return [line.strip() for line in md_text.splitlines()
+            if line.strip() and not line.startswith("#") and not line.startswith(">")
+            and line.strip() not in ignored]
+
+
+def coverage_report(source_units: list[str], derived_units: list[str], faithful: bool = True) -> dict:
+    """按顺序对齐全文。包含检查不能当通过条件；等长替换、漏段、重复和乱序都要报出。"""
+    source = [re.sub(r"\s+", "", item.strip()) for item in source_units if item and item.strip()]
+    derived = [re.sub(r"\s+", "", item.strip()) for item in derived_units if item and item.strip()]
+    source_keys = [normalize(item) for item in source]
+    derived_keys = [normalize(item) for item in derived]
+    punctuation = []
+    missing, added, replaced, duplicate = [], [], [], []
+    reordered = False
+    if source_keys == derived_keys:
+        punctuation = [{"source": left, "derived": right}
+                       for left, right in zip(source, derived) if left != right]
+    else:
+        source_count, derived_count = Counter(source_keys), Counter(derived_keys)
+        if source_count == derived_count:
+            reordered = True
+        else:
+            for key, count in source_count.items():
+                gap = count - derived_count.get(key, 0)
+                if gap > 0:
+                    missing.extend([key] * gap)
+            for key, count in derived_count.items():
+                gap = count - source_count.get(key, 0)
+                if gap > 0:
+                    added.extend([key] * gap)
+                    if key in source_count:
+                        duplicate.extend([key] * gap)
+            if len(source_keys) == len(derived_keys):
+                replaced = [{"source": left, "derived": right}
+                            for left, right in zip(source_keys, derived_keys) if left != right]
+    source_join = "".join(source_keys)
+    content_ok = source_keys == derived_keys
+    return {
+        "ok": content_ok and not (punctuation and faithful),
+        "content_ok": content_ok,
+        "missing": missing[:8], "added": added[:8], "duplicate": duplicate[:8],
+        "replaced": replaced[:8], "punctuation": punctuation[:8],
+        "missing_count": len(missing), "added_count": len(added),
+        "duplicate_count": len(duplicate), "replaced_count": len(replaced),
+        "punctuation_count": len(punctuation), "reordered": reordered,
+        "containment_would_pass": all(key in source_join for key in derived_keys) if derived_keys else not source_keys,
+    }
+
+
+def json_subtitle_langs(info: dict) -> list[str]:
+    langs = []
+    for key in ("subtitles", "automatic_captions"):
+        value = info.get(key) or {}
+        if isinstance(value, dict):
+            langs.extend(str(lang) for lang in value)
+    return langs
+
+
+def parse_list_subs(text: str) -> list[dict]:
+    tracks, section = [], None
+    for line in text.splitlines():
+        if "Available subtitles for" in line:
+            section = "manual"
+            continue
+        if "Available automatic captions for" in line:
+            section = "auto"
+            continue
+        if "has no subtitles" in line or "has no automatic captions" in line:
+            section = None
+            continue
+        if section is None or not line.strip() or line.strip().startswith("Language") or line.startswith("["):
+            continue
+        lang = line.split()[0]
+        if lang.lower() == "language":
+            continue
+        tracks.append({"lang": lang, "automatic": section == "auto", "formats": line.split()[-1]})
+    return tracks
+
+
+def choose_track(tracks: list[dict]) -> dict:
+    def rank(track: dict) -> tuple[int, int]:
+        lang = track["lang"].lower()
+        try:
+            preferred = LANG_PREFERENCE.index(lang)
+        except ValueError:
+            preferred = 100
+        return preferred, 1 if track.get("automatic") else 0
+    return sorted(tracks, key=rank)[0]
+
+
+def classify_subtitle_probe(stdout: str, stderr: str, returncode: int,
+                            json_langs: list[str], requested_lang: str | None = None) -> dict:
+    """独立列字幕的结果才是状态。普通 JSON 字幕字段为空不能当成确认无字幕。"""
+    text = f"{stdout}\n{stderr}"
+    tracks = parse_list_subs(text)
+    real = [track for track in tracks if track["lang"].lower() not in IGNORED_LANGS]
+    login = bool(re.search(r"only available when logged in|need_login_subtitle", text, re.I))
+    real_json = [lang for lang in json_langs if lang.lower() not in IGNORED_LANGS]
+    result = {
+        "json_subtitle_field_empty": not real_json,
+        "json_field_used_as_verdict": False,
+        "tracks": real,
+        "danmaku_ignored": any(track["lang"].lower() in IGNORED_LANGS for track in tracks),
+        "login_warning": login,
+        "returncode": returncode,
+    }
+    explicit_absence = "has no subtitles" in text or "has no automatic captions" in text or result["danmaku_ignored"]
+    if returncode != 0 and not (login and not real):
+        return {**result, "status": "request_failed"}
+    if login and not real:
+        return {**result, "status": "login_required"}
+    matched = real
+    if requested_lang:
+        wanted = requested_lang.lower()
+        matched = [track for track in real if track["lang"].lower() == wanted]
+        if real and not matched:
+            return {**result, "status": "filter_no_match"}
+    if matched:
+        return {**result, "status": "found", "chosen": choose_track(matched)}
+    if returncode == 0 and not login and explicit_absence:
+        return {**result, "status": "confirmed_none"}
+    return {**result, "status": "request_failed"}
+
+
+def has_protected_output(out_dir: Path) -> bool:
+    """只有探测日志时允许重试。音频、字幕原件和章节稿仍受保护。"""
+    if not out_dir.exists():
+        return False
+    for item in out_dir.rglob("*"):
+        if not item.is_file() or item.parent.name == "logs" or item.name == "subtitle-probe.json":
+            continue
+        return True
+    return False
+
+
+def probe_subtitles(url: str, info: dict, log_path: Path, requested_lang: str | None = None) -> dict:
+    result = run_ytdlp(["--list-subs", "--no-playlist", "--skip-download", url], capture=True)
+    stdout = (result.stdout or b"").decode("utf-8", "replace")
+    stderr = (result.stderr or b"").decode("utf-8", "replace")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(stdout + "\n" + stderr, encoding="utf-8")
+    probe = classify_subtitle_probe(
+        stdout, stderr, result.returncode, json_subtitle_langs(info), requested_lang)
+    probe["part"] = {
+        "id": info.get("id"), "title": info.get("title"),
+        "playlist_index": info.get("playlist_index"), "n_entries": info.get("n_entries"),
+    }
+    return probe
+
+
+def write_probe(out_dir: Path, probe: dict) -> None:
+    public = {key: probe.get(key) for key in (
+        "status", "json_subtitle_field_empty", "json_field_used_as_verdict",
+        "tracks", "danmaku_ignored", "login_warning", "returncode", "part", "chosen")}
+    (out_dir / "subtitle-probe.json").write_text(
+        json.dumps(public, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def download_subtitle_original(url: str, dest_dir: Path, slug: str, lang: str, log_path: Path) -> Path:
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    result = run_ytdlp([
+        "--no-playlist", "--skip-download", "--write-subs", "--write-auto-subs",
+        "--sub-langs", lang, "--convert-subs", "srt", "--no-overwrites",
+        "-o", str(dest_dir / f"{slug}.%(ext)s"), url,
+    ], log_path=log_path)
+    if result.returncode != 0:
+        raise PodError(EX_DOWNLOAD, f"字幕轨道已发现，但原件下载失败。不能改记为无字幕。日志末尾：\n{tail_text(log_path)}")
+    saved = [item for item in dest_dir.iterdir() if item.is_file() and slug in item.name]
+    srt_files = [item for item in saved if item.suffix.lower() == ".srt"]
+    if srt_files:
+        srt_files.sort(key=lambda item: item.name)
+        return srt_files[0]
+    others = [item.name for item in saved if item.suffix.lower() in {".vtt", ".ass", ".json"}]
+    if others:
+        raise PodError(EX_DOWNLOAD, f"字幕原件不是 SRT：{', '.join(others)}。格式不支持，不能改记为无字幕。")
+    raise PodError(EX_DOWNLOAD, "字幕轨道已发现，但没有保存到原件。不能改记为无字幕。")
+
+
+def cue_source_units(cues: list[dict], unlocated: list[str]) -> list[str]:
+    units = []
+    for cue in cues:
+        units.extend(text_units(cue.get("text") or ""))
+    units.extend(item.strip() for item in unlocated if item and item.strip())
+    return units
+
+
+def probe_block_message(status: str) -> str:
+    meaning = {
+        "login_required": "需要登录",
+        "request_failed": "请求失败",
+        "filter_no_match": "筛选无匹配",
+    }[status]
+    return f"字幕探测状态：{status}（{meaning}）。不能写成确认无字幕，也未选择音频 ASR。"
 
 
 # ---------------------------------------------------------------- 主流程
 
+def write_chapters(out_dir: Path, toc: dict, slug: str, cues: list[dict], unlocated: list[str],
+                   polish: str, source_path: Path, origin: dict, asr: bool,
+                   txt_text: str | None = None, json_path: Path | None = None) -> int:
+    """全文覆盖不通过就不写 chapters.md。包含检查只作对照，不能单独放行。"""
+    if txt_text is None:
+        txt_text = "\n".join(cue.get("text") or "" for cue in cues)
+    md_text = build_chapters_md(toc, cues, txt_text, polish, origin=origin, unlocated=unlocated)
+    derived = chapter_body_units(md_text)
+    timed = toc.get("source") != "none" and any(isinstance(cue.get("start"), (int, float)) for cue in cues)
+    source_units = cue_source_units(cues, unlocated) if timed else text_units(apply_polish(txt_text, polish)) + unlocated
+    if timed and polish == "basic":
+        source_units = text_units(apply_polish("\n".join(source_units), polish))
+    report = coverage_report(source_units, derived, faithful=polish == "off")
+    print(
+        "全文覆盖："
+        f"缺失 {report['missing_count']}，增加 {report['added_count']}，"
+        f"重复 {report['duplicate_count']}，乱序 {report['reordered']}，"
+        f"替换 {report['replaced_count']}，标点 {report['punctuation_count']}。"
+        f"仅包含检查会通过：{report['containment_would_pass']}"
+    )
+    if not report["ok"]:
+        raise PodError(EX_SPLIT, "全文覆盖未通过：漏段、增加、重复、乱序、替换或忠实模式下的标点改动。未写入 chapters.md")
+    if unlocated:
+        print("时间轴未通过：无效时间戳已单列，未伪造时间，也未丢文本。")
+    tmp_path = out_dir / "chapters.md.tmp"
+    tmp_path.write_text(md_text, encoding="utf-8")
+    tmp_path.replace(out_dir / "chapters.md")
+    fingerprint, source_bytes = srt_fingerprint(source_path)
+    toc["slug"] = slug
+    toc["text_source"] = {"kind": origin["kind"], "lang": origin.get("lang"), "probe_status": origin["probe_status"]}
+    relative = source_path.relative_to(out_dir).as_posix()
+    toc["transcript"] = {".srt": relative}
+    if asr:
+        toc["transcript"][".txt"] = source_path.with_suffix(".txt").name
+    if json_path is not None:
+        toc["transcript"][".json"] = json_path.name
+    toc["verify"] = {
+        "body_lines": len(derived), "coverage_ok": report["ok"],
+        "missing_count": report["missing_count"], "added_count": report["added_count"],
+        "duplicate_count": report["duplicate_count"], "reordered": report["reordered"],
+        "replaced_count": report["replaced_count"], "punctuation_count": report["punctuation_count"],
+        "timeline_ok": not unlocated, "containment_is_not_acceptance": True,
+    }
+    toc["source_fingerprint"] = fingerprint
+    toc["srt_bytes"] = source_bytes
+    (out_dir / "toc.json").write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"完成。文字来源：{origin['text_source']}\n  {out_dir / 'chapters.md'}\n  {source_path}")
+    return EX_OK
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         prog="podcast2md.py",
-        description="播客单集 URL → 下载、CapsWriter 转录、按章节切分 → work/<slug>/chapters.md",
-        epilog="使用说明见 PODCAST2MD.md；不读 API Key，不调云端模型。")
+        description="播客或视频 URL → 独立探测字幕；有可用轨道则保存原件并生成文字稿，确认无可用轨道才转写",
+        epilog="探测失败或需登录时停止，不回退 ASR，也不写成确认无字幕。使用说明见 PODCAST2MD.md。")
     p.add_argument("url", help="单集页面或音频直链 URL")
     p.add_argument("--out-dir", default=str(DEFAULT_WORK), help="输出根目录（默认 <脚本目录>/work）")
     p.add_argument("--force", action="store_true", help="目标成品目录已存在时删除重建")
@@ -643,6 +949,8 @@ def parse_args(argv=None):
     p.add_argument("--server-timeout", type=float, default=600, help="等服务端就绪秒数（默认 600）")
     p.add_argument("--transcribe-timeout", type=float, default=None,
                help="等转录完成秒数。未传时按 max(600, 音频秒数×4+120) 计算；取不到时长或时长为 0 则用 7200。显式传入后不被覆盖")
+    p.add_argument("--sub-lang", default=None,
+                   help="只接受该语言字幕轨。有其他轨道但没有这一轨时状态为 filter_no_match，停止且不转写")
     return p.parse_args(argv)
 
 
@@ -662,13 +970,6 @@ def main(argv=None) -> int:
     if out_root != DEFAULT_WORK.resolve():
         print(f"警告：原件默认集中存放在部署副本 work（{DEFAULT_WORK}）。确认你要改根目录：{out_root}")
 
-    # 前置检查。ffmpeg 缺失必须在下载和拉起服务端之前失败，不能留到转录阶段报成退出码 5。
-    if not shutil.which("ffmpeg"):
-        raise PodError(EX_USAGE, "ffmpeg 不在 PATH，先装再跑")
-    for exe in (SERVER_EXE, CLIENT_EXE):
-        if not exe.exists():
-            raise PodError(EX_USAGE, f"缺少 {exe}，请在 CapsWriter-Offline 根目录运行本脚本")
-
     # 1) 信息 + slug。失败时的原始 JSON 落到本次 --out-dir，不写死脚本目录。
     info_log = out_root / "logs" / "_podcast2md_info.json"
     info = ytdlp_dump_info(args.url, info_log)
@@ -676,12 +977,12 @@ def main(argv=None) -> int:
     out_dir = Path(args.out_dir) / slug
     print(f"单集标题：{info.get('title')}\nslug：{slug}\n成品目录：{out_dir}")
 
-    # 2) 成品保护：已有则拒绝，除非 --force。指纹不一致只标记，不重跑。
+    # 2) 成品保护。只有探测日志时允许重试；原件和章节稿仍要 --force。
     if out_dir.exists() and not args.force:
         mark_stale_toc(out_dir)
-    if out_dir.exists() and any(out_dir.iterdir()):
+    if has_protected_output(out_dir):
         if not args.force:
-            raise PodError(EX_EXISTS, f"目录已存在且非空：{out_dir}（覆盖请加 --force）")
+            raise PodError(EX_EXISTS, f"目录已有原件或章节稿：{out_dir}（覆盖请加 --force）")
         try:
             shutil.rmtree(out_dir)
         except PermissionError as e:
@@ -690,18 +991,46 @@ def main(argv=None) -> int:
         print(f"--force：已清空重建 {out_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
     logs = out_dir / "logs"
-
-    # 3) 下载
-    audio = download_audio(args.url, out_dir, slug, logs / "ytdlp.log")
-
-    # 4) 目录
     toc = extract_toc(info)
+
+    # 3) 独立探测。JSON 字幕字段为空不是结论，失败状态不回退 ASR。
+    probe = probe_subtitles(args.url, info, logs / "list-subs.log", args.sub_lang)
+    write_probe(out_dir, probe)
+    print(f"字幕探测：{probe['status']}｜JSON 字幕字段为空：{probe['json_subtitle_field_empty']}（不作结论）")
+    if probe["status"] in {"login_required", "request_failed", "filter_no_match"}:
+        raise PodError(EX_DOWNLOAD, probe_block_message(probe["status"]))
+    if probe["status"] == "found":
+        chosen = probe["chosen"]
+        kind = "平台AI" if chosen.get("automatic") else "普通CC"
+        print(f"使用字幕原件：{source_label(kind, chosen['lang'])}。不转写。")
+        subtitle = download_subtitle_original(
+            args.url, out_dir / "original-subs", slug, chosen["lang"], logs / "subtitle-download.log")
+        cues, unlocated = parse_srt_document(subtitle.read_text(encoding="utf-8-sig", errors="replace"))
+        if not cues and not unlocated:
+            raise PodError(EX_SPLIT, f"已保存字幕原件，但没有解析出文本：{subtitle.name}。不能改记为无字幕。")
+        return write_chapters(
+            out_dir, toc, slug, cues, unlocated, args.polish, subtitle, {
+                "kind": kind, "lang": chosen["lang"], "probe_status": probe["status"],
+                "text_source": source_label(kind, chosen["lang"]),
+                "generator": "podcast2md.py（平台字幕原件，未跑 CapsWriter）",
+                "probe_note": probe["status"],
+            }, asr=False)
+
+    if probe["status"] != "confirmed_none":
+        raise PodError(EX_DOWNLOAD, probe_block_message("request_failed"))
+    print("字幕探测：confirmed_none。已明确选择音频 ASR。")
+    if not shutil.which("ffmpeg"):
+        raise PodError(EX_USAGE, "ffmpeg 不在 PATH，先装再跑")
+    for exe in (SERVER_EXE, CLIENT_EXE):
+        if not exe.exists():
+            raise PodError(EX_USAGE, f"缺少 {exe}，请在 CapsWriter-Offline 根目录运行本脚本")
+
+    # 4) 只有确认无可用轨道才下载并转写。
+    audio = download_audio(args.url, out_dir, slug, logs / "ytdlp.log")
     n = len(toc["chapters"])
     print(f"章节：{n} 章（来源：{toc['source']}）" +
           ("；仅一章「全文」" if toc["source"] == "none" else
            "；" + " / ".join(c["title"][:12] for c in toc["chapters"][:5])))
-
-    # 5) 转录。未显式传超时则按音频时长计算，取不到时长才退回 7200。
     duration = probe_audio_duration(audio)
     budget = compute_transcribe_timeout(duration, args.transcribe_timeout)
     shown_duration = "未知" if duration is None else f"{duration:.1f}s"
@@ -714,35 +1043,20 @@ def main(argv=None) -> int:
         if server_proc is not None and server_proc.poll() is None:
             log("服务端保持运行（复用加速下次转录）；如需停止请托盘退出或结束 start_server.exe")
 
-    # 6) 切分 + 校验 + 落盘
     txt_text = audio.with_suffix(".txt").read_text(encoding="utf-8", errors="replace")
     srt_path = audio.with_suffix(".srt")
-    cues = parse_srt(srt_path)
-    require_srt_txt_contract(cues, txt_text)
+    cues, unlocated = parse_srt_document(srt_path.read_text(encoding="utf-8-sig", errors="replace"))
+    if not cues and not unlocated:
+        raise PodError(EX_SPLIT, f"未能从 {srt_path.name} 解析出任何字幕条目")
+    require_srt_txt_contract(cues, txt_text, unlocated)
     require_json_tokens(audio.with_suffix(".json"), txt_text)
-    md_text = build_chapters_md(toc, cues, txt_text, args.polish)
-    v = verify_chapters(md_text, txt_text)
-
-    # 7) 先校验。未通过不写 chapters.md，避免目录里留下下次必须 --force 才能清的坏稿。
-    print(f"章节句校验：{v['total']} 行，字面缺失 {v['literal_miss']}，归一化后缺失 {0 if v['ok'] else len(v['miss_examples'])}")
-    if not v["ok"]:
-        print("缺失示例：" + " ｜ ".join(v["miss_examples"]))
-        raise PodError(EX_SPLIT, "章节校验未通过：存在 .txt 中找不到的句子（见上方示例）。未写入 chapters.md")
-    chapter_path = out_dir / "chapters.md"
-    tmp_path = out_dir / "chapters.md.tmp"
-    tmp_path.write_text(md_text, encoding="utf-8")
-    tmp_path.replace(chapter_path)
-    toc["slug"] = slug
-    toc["transcript"] = {f"{ext}": audio.with_suffix(ext).name for ext in (".txt", ".srt", ".json")}
-    toc["verify"] = {"body_lines": v["total"], "literal_miss": v["literal_miss"], "normalized_miss": 0}
-    fingerprint, srt_bytes = srt_fingerprint(srt_path)
-    toc["source_fingerprint"] = fingerprint
-    toc["srt_bytes"] = srt_bytes
-    (out_dir / "toc.json").write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("完成。产物：\n  " + "\n  ".join(str(f) for f in [
-        audio, out_dir / "toc.json", audio.with_suffix(".txt"),
-        audio.with_suffix(".srt"), audio.with_suffix(".json"), out_dir / "chapters.md"]))
-    return EX_OK
+    return write_chapters(
+        out_dir, toc, slug, cues, unlocated, args.polish, srt_path, {
+            "kind": "本机ASR", "lang": None, "probe_status": "confirmed_none",
+            "text_source": source_label("本机ASR"),
+            "generator": "podcast2md.py（CapsWriter-Offline / fun_asr_nano）",
+            "probe_note": "confirmed_none；已明确选择音频 ASR",
+        }, asr=True, txt_text=txt_text, json_path=audio.with_suffix(".json"))
 
 
 if __name__ == "__main__":
