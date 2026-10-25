@@ -532,7 +532,8 @@ def check_json_tokens(json_path: Path, txt_text: str) -> dict | None:
     token_norm = normalize(joined)
     txt_norm = normalize(txt_text)
     ratio = (len(token_norm) / len(txt_norm)) if txt_norm else 0.0
-    return {"ok": count_ok and ratio >= CONTRACT_RATIO,
+    contained = bool(token_norm) and token_norm in txt_norm
+    return {"ok": count_ok and contained and ratio >= CONTRACT_RATIO,
             "count_ok": count_ok, "token_count": len(tokens),
             "timestamp_count": len(timestamps) if isinstance(timestamps, list) else None,
             "token_len": len(token_norm), "txt_len": len(txt_norm),
@@ -559,7 +560,7 @@ def probe_audio_duration(audio: Path) -> float | None:
         return None
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(audio)],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
     )
     if result.returncode != 0:
         return None
@@ -584,7 +585,7 @@ def srt_fingerprint(path: Path) -> tuple[str, int]:
 
 
 def mark_stale_toc(out_dir: Path) -> None:
-    """已有 toc 与当前 srt 指纹不一致时只标记，不重跑转录。"""
+    """已有 toc 与当前 srt 指纹不一致时只打印警告。不改写 toc.json。"""
     toc_path = out_dir / "toc.json"
     if not toc_path.exists():
         return
@@ -606,9 +607,7 @@ def mark_stale_toc(out_dir: Path) -> None:
     stored = toc.get("source_fingerprint")
     if not isinstance(stored, str) or stored == current:
         return
-    print(f"警告：toc.json 指纹与当前 srt 不一致，已标记 stale，不自动重跑：{srt_path.name}")
-    toc["stale"] = True
-    toc_path.write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"警告：toc.json 指纹与当前 srt 不一致，不自动重跑，也不改写 toc.json：{srt_path.name}")
 
 
 def verify_chapters(md_text: str, txt_text: str) -> dict:

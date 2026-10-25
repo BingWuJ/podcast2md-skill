@@ -39,7 +39,7 @@ python .\podcast2md.py --help
 2. **章节目录**：优先 yt-dlp chapters；否则解析描述中 `M:SS 标题` 时间戳行（至少 2 条）；再尝试单集页 HTML 时间轴区块。全部失败则只放一章「全文」，不发明章节。首章之前的内容并入第一章。HTML 提取是格式相关的尽力回退，不保证任意网站通用。
 3. **转录**：探测本地服务端端口；未运行则拉起 `start_server.exe`，不改引擎配置。启动 `start_client.exe <音频>` 转录，产物齐备后 CLI 代写回车越过「按回车退出」，再等待/终止客户端进程。
 4. **切分**：解析 `.srt`，按条目起点时间归入章节，写入 `chapters.md`。不会在跨章字幕条目内部逐字切分。
-5. **校验**：切章前先核对 srt 与 txt。srt 各条文本归一化后必须是 txt 归一化串的子串，且长度比不得低于 0.99。同目录 `.json` 若有 `tokens`，还核对它与 `timestamps` 数量相同，以及与 txt 的归一化长度比不得低于 0.99。不通过时退出码为 5，不写 `chapters.md`。通过后再检查 `chapters.md` 正文能在 `.txt` 中找到。`toc.json` 记录 srt 字节的 sha1 和字节数；读取已有 toc 时若指纹不一致，只警告并标记 `stale: true`，不自动重跑。
+5. **校验**：切章前先核对 srt 与 txt。srt 各条文本归一化后必须是 txt 归一化串的子串，且长度比不得低于 0.99。同目录 `.json` 若有 `tokens`，还核对它与 `timestamps` 数量相同，以及与 txt 的归一化长度比不得低于 0.99。不通过时退出码为 5，不写 `chapters.md`。通过后再检查 `chapters.md` 正文能在 `.txt` 中找到。`toc.json` 记录 srt 字节的 sha1 和字节数；读取已有 toc 时若指纹不一致，只打印警告，不改写该文件，也不自动重跑。json tokens 归一化后还必须是 txt 的子串。
 
 ### 成品目录 `<输出根目录>/<slug>/`
 
@@ -114,7 +114,7 @@ Existing output is protected by default. **`--force` deletes the existing episod
 2. **Chapter outline:** prefer yt-dlp chapters, then description timestamp lines such as `M:SS Title` (at least two entries), then an HTML timeline. If none is available, use a single full-transcript chapter. Content before the first chapter is included in that chapter. HTML extraction is format-dependent and best-effort.
 3. **Transcribe:** probe the local server port and launch `start_server.exe` if needed without changing its engine configuration. Invoke `start_client.exe <audio>`. Once the output files are ready, send a newline to dismiss the exit prompt, then wait for or terminate the client process.
 4. **Segment:** parse `.srt` and assign each cue to a chapter using its start time. Cues crossing a chapter boundary are not split character by character.
-5. **Validate:** before splitting chapters, the normalized subtitle cues must be a substring of the normalized `.txt`, with a length ratio of at least 0.99. If the CapsWriter `.json` has `tokens`, its count must equal `timestamps` and its normalized length ratio against `.txt` must also be at least 0.99. Failure exits with code 5 and does not write `chapters.md`. `toc.json` stores the srt sha1 and byte count. An existing toc with a different fingerprint is marked `stale: true` and is not rerun automatically.
+5. **Validate:** before splitting chapters, the normalized subtitle cues must be a substring of the normalized `.txt`, with a length ratio of at least 0.99. If the CapsWriter `.json` has `tokens`, its count must equal `timestamps` and its normalized length ratio against `.txt` must also be at least 0.99. Failure exits with code 5 and does not write `chapters.md`. `toc.json` stores the srt sha1 and byte count. An existing toc with a different fingerprint only prints a warning; the file is not rewritten and the run is not repeated. Normalized json tokens must also be a substring of the txt.
 
 ### Output directory: `<output root>/<slug>/`
 
