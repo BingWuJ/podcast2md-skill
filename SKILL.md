@@ -61,7 +61,7 @@ python .\podcast2md.py "单集URL" --transcribe-timeout 10800
 | `--force` | 关 | 删除已有单集目录重跑；会丢手动修改 |
 | `--polish` | `off` | `basic` 只是规则去语气词，非模型润色；要忠实原稿用 `off` |
 | `--server-timeout` | 600s | server 拉起等待 |
-| `--transcribe-timeout` | 7200s | 转录等待；长节目调大（如 10800） |
+| `--transcribe-timeout` | `max(600, 音频秒数×4+120)` | 未传时按 ffprobe 时长计算；取不到时长用 7200。显式传入后不被覆盖 |
 
 ## 坑（先读再跑）
 

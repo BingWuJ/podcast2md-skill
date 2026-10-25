@@ -29,7 +29,7 @@ python .\podcast2md.py --help
 | `--polish` | `off` | `off`=未润色原文；`basic`=去段首尾语气词、同字 3 连及以上收敛为 1 字 |
 | `--port` | 读 `config_server.py`，失败回退 6016 | 服务端监听探测端口；不会改写 CapsWriter 客户端/服务端配置 |
 | `--server-timeout` | 600 秒 | 拉起 `start_server.exe` 后等待就绪的时长 |
-| `--transcribe-timeout` | 7200 秒 | 等待转录产物完成的时长 |
+| `--transcribe-timeout` | 按音频时长计算 | 未传时为 `max(600, 时长×4+120)` 秒。ffprobe 取不到时长或时长为 0 时用 7200 秒。显式传入后不被覆盖。启动时打印音频时长和本次预算 |
 
 `--polish basic` 不是模型润色：规则可能影响有意义的重复字符或数字，也可能因正文校验失败而退出。需要忠实原稿时使用默认 `off`，保留 `.txt` 后再人工或由 AI 助手校对。`--port` 应与现有 CapsWriter 配置一致，不能单靠此参数更改转录服务地址。
 
@@ -39,7 +39,7 @@ python .\podcast2md.py --help
 2. **章节目录**：优先 yt-dlp chapters；否则解析描述中 `M:SS 标题` 时间戳行（至少 2 条）；再尝试单集页 HTML 时间轴区块。全部失败则只放一章「全文」，不发明章节。首章之前的内容并入第一章。HTML 提取是格式相关的尽力回退，不保证任意网站通用。
 3. **转录**：探测本地服务端端口；未运行则拉起 `start_server.exe`，不改引擎配置。启动 `start_client.exe <音频>` 转录，产物齐备后 CLI 代写回车越过「按回车退出」，再等待/终止客户端进程。
 4. **切分**：解析 `.srt`，按条目起点时间归入章节，写入 `chapters.md`。不会在跨章字幕条目内部逐字切分。
-5. **校验**：`chapters.md` 每行正文必须在 `.txt` 中能找到；字面匹配优先，去标点空白后兜底，失败则报错退出。
+5. **校验**：切章前先核对 srt 与 txt。srt 各条文本归一化后必须是 txt 归一化串的子串，且长度比不得低于 0.99。同目录 `.json` 若有 `tokens`，还核对它与 `timestamps` 数量相同，以及与 txt 的归一化长度比不得低于 0.99。不通过时退出码为 5，不写 `chapters.md`。通过后再检查 `chapters.md` 正文能在 `.txt` 中找到。`toc.json` 记录 srt 字节的 sha1 和字节数；读取已有 toc 时若指纹不一致，只警告并标记 `stale: true`，不自动重跑。
 
 ### 成品目录 `<输出根目录>/<slug>/`
 
@@ -104,7 +104,7 @@ Existing output is protected by default. **`--force` deletes the existing episod
 | `--polish` | `off` | `off` preserves the transcript; `basic` removes boundary fillers and collapses three or more identical consecutive characters to one |
 | `--port` | Read from `config_server.py`, falling back to 6016 | Port used to probe the server; does not rewrite CapsWriter client or server configuration |
 | `--server-timeout` | 600 seconds | Maximum wait for the launched server to become ready |
-| `--transcribe-timeout` | 7200 seconds | Maximum wait for transcription output |
+| `--transcribe-timeout` | Computed from duration | When omitted, `max(600, duration×4+120)` seconds. Falls back to 7200 if ffprobe cannot read a positive duration. An explicit value is never overridden. Startup prints duration and the budget used |
 
 `--polish basic` is not model-based editing. Its rules can affect meaningful repeated characters or digits, and the result may fail transcript validation. For a faithful source transcript, keep the default `off` and proofread a copy of the `.txt` file manually or with an AI assistant. `--port` must match the existing CapsWriter setup; this flag alone cannot change the transcription service address.
 
@@ -114,7 +114,7 @@ Existing output is protected by default. **`--force` deletes the existing episod
 2. **Chapter outline:** prefer yt-dlp chapters, then description timestamp lines such as `M:SS Title` (at least two entries), then an HTML timeline. If none is available, use a single full-transcript chapter. Content before the first chapter is included in that chapter. HTML extraction is format-dependent and best-effort.
 3. **Transcribe:** probe the local server port and launch `start_server.exe` if needed without changing its engine configuration. Invoke `start_client.exe <audio>`. Once the output files are ready, send a newline to dismiss the exit prompt, then wait for or terminate the client process.
 4. **Segment:** parse `.srt` and assign each cue to a chapter using its start time. Cues crossing a chapter boundary are not split character by character.
-5. **Validate:** check every transcript body line in `chapters.md` against `.txt`, using literal matching first and a punctuation/whitespace-normalized fallback. Exit with an error if validation fails.
+5. **Validate:** before splitting chapters, the normalized subtitle cues must be a substring of the normalized `.txt`, with a length ratio of at least 0.99. If the CapsWriter `.json` has `tokens`, its count must equal `timestamps` and its normalized length ratio against `.txt` must also be at least 0.99. Failure exits with code 5 and does not write `chapters.md`. `toc.json` stores the srt sha1 and byte count. An existing toc with a different fingerprint is marked `stale: true` and is not rerun automatically.
 
 ### Output directory: `<output root>/<slug>/`
 

@@ -13,6 +13,7 @@ podcast2md.py — 播客单集链接转写 CLI（单文件，仅标准库）
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -468,6 +469,148 @@ def normalize(s: str) -> str:
     return re.sub(r"[\s\W_]+", "", s, flags=re.UNICODE)
 
 
+def first_missing_index(needle: str, haystack: str) -> int:
+    """返回 needle 中第一个无法在 haystack 里延续的位置。"""
+    if needle in haystack:
+        return -1
+    lo, hi = 0, len(needle)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if needle[:mid] in haystack:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+CONTRACT_RATIO = 0.99
+
+
+def missing_preview(left: str, right: str) -> str:
+    """定位第一个对不上的位置，取其后 30 字。"""
+    if left in right:
+        return right[len(left):len(left) + 30]
+    at = first_missing_index(left, right)
+    return left[at:at + 30]
+
+
+def check_srt_txt_contract(cues: list[dict], txt_text: str) -> dict:
+    """切章前确认 srt 没有相对 txt 截断。正常产物应完全相等，不是接近。"""
+    srt_norm = normalize("".join(c["text"] for c in cues))
+    txt_norm = normalize(txt_text)
+    ratio = (len(srt_norm) / len(txt_norm)) if txt_norm else 0.0
+    contained = bool(srt_norm) and srt_norm in txt_norm
+    return {"ok": contained and ratio >= CONTRACT_RATIO,
+            "srt_len": len(srt_norm), "txt_len": len(txt_norm),
+            "ratio": ratio, "preview": missing_preview(srt_norm, txt_norm)}
+
+
+def require_srt_txt_contract(cues: list[dict], txt_text: str) -> dict:
+    result = check_srt_txt_contract(cues, txt_text)
+    if not result["ok"]:
+        raise PodError(
+            EX_TRANSCRIBE,
+            "srt/txt 不一致：srt 归一化长度 {srt_len} / txt 归一化长度 {txt_len} / 比值 {ratio:.4f} / 首个缺失位置前30字：{preview}。未写入 chapters.md".format(**result),
+        )
+    return result
+
+
+def check_json_tokens(json_path: Path, txt_text: str) -> dict | None:
+    """没有 tokens 字段就跳过。有 timestamps 时数量必须与 tokens 相同。"""
+    if not json_path.exists():
+        return None
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("tokens"), list):
+        return None
+    tokens = data["tokens"]
+    timestamps = data.get("timestamps")
+    count_ok = not isinstance(timestamps, list) or len(tokens) == len(timestamps)
+    joined = "".join(item if isinstance(item, str) else str(item) for item in tokens)
+    token_norm = normalize(joined)
+    txt_norm = normalize(txt_text)
+    ratio = (len(token_norm) / len(txt_norm)) if txt_norm else 0.0
+    return {"ok": count_ok and ratio >= CONTRACT_RATIO,
+            "count_ok": count_ok, "token_count": len(tokens),
+            "timestamp_count": len(timestamps) if isinstance(timestamps, list) else None,
+            "token_len": len(token_norm), "txt_len": len(txt_norm),
+            "ratio": ratio, "preview": missing_preview(token_norm, txt_norm)}
+
+
+def require_json_tokens(json_path: Path, txt_text: str) -> None:
+    result = check_json_tokens(json_path, txt_text)
+    if result is None or result["ok"]:
+        return
+    if not result["count_ok"]:
+        raise PodError(
+            EX_TRANSCRIBE,
+            "json tokens 与 timestamps 数量不一致：tokens {token_count} / timestamps {timestamp_count}。未写入 chapters.md".format(**result),
+        )
+    raise PodError(
+        EX_TRANSCRIBE,
+        "json tokens 与 txt 不一致：tokens 归一化长度 {token_len} / txt 归一化长度 {txt_len} / 比值 {ratio:.4f} / 首个缺失位置前30字：{preview}。未写入 chapters.md".format(**result),
+    )
+
+
+def probe_audio_duration(audio: Path) -> float | None:
+    if not shutil.which("ffprobe"):
+        return None
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(audio)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        duration = float((result.stdout or "").strip())
+    except ValueError:
+        return None
+    return duration if duration > 0 else None
+
+
+def compute_transcribe_timeout(duration: float | None, explicit: float | None) -> float:
+    if explicit is not None:
+        return explicit
+    if duration is None or duration <= 0:
+        return 7200.0
+    return max(600.0, duration * 4 + 120)
+
+
+def srt_fingerprint(path: Path) -> tuple[str, int]:
+    data = path.read_bytes()
+    return hashlib.sha1(data).hexdigest(), len(data)
+
+
+def mark_stale_toc(out_dir: Path) -> None:
+    """已有 toc 与当前 srt 指纹不一致时只标记，不重跑转录。"""
+    toc_path = out_dir / "toc.json"
+    if not toc_path.exists():
+        return
+    try:
+        toc = json.loads(toc_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"警告：无法读取已有 toc.json，不自动重跑：{toc_path}")
+        return
+    if not isinstance(toc, dict):
+        return
+    name = (toc.get("transcript") or {}).get(".srt") if isinstance(toc.get("transcript"), dict) else None
+    srt_path = out_dir / name if name else None
+    if srt_path is None or not srt_path.exists():
+        found = [p for p in out_dir.glob("*.srt")]
+        srt_path = found[0] if len(found) == 1 else None
+    if srt_path is None or not srt_path.exists():
+        return
+    current, _ = srt_fingerprint(srt_path)
+    stored = toc.get("source_fingerprint")
+    if not isinstance(stored, str) or stored == current:
+        return
+    print(f"警告：toc.json 指纹与当前 srt 不一致，已标记 stale，不自动重跑：{srt_path.name}")
+    toc["stale"] = True
+    toc_path.write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def verify_chapters(md_text: str, txt_text: str) -> dict:
     """验收核心：chapters.md 的正文句必须能在 .txt 里找到（字面优先，归一化兜底）"""
     body_lines = [ln for ln in md_text.splitlines()
@@ -499,7 +642,8 @@ def parse_args(argv=None):
                    help="off=未润色原文（默认）；basic=保守规则清理（去语气词、相邻重复）")
     p.add_argument("--port", type=int, default=None, help="服务端端口（默认读 config_server.py）")
     p.add_argument("--server-timeout", type=float, default=600, help="等服务端就绪秒数（默认 600）")
-    p.add_argument("--transcribe-timeout", type=float, default=7200, help="等转录完成秒数（默认 7200）")
+    p.add_argument("--transcribe-timeout", type=float, default=None,
+               help="等转录完成秒数。未传时按 max(600, 音频秒数×4+120) 计算；取不到时长或时长为 0 则用 7200。显式传入后不被覆盖")
     return p.parse_args(argv)
 
 
@@ -533,7 +677,9 @@ def main(argv=None) -> int:
     out_dir = Path(args.out_dir) / slug
     print(f"单集标题：{info.get('title')}\nslug：{slug}\n成品目录：{out_dir}")
 
-    # 2) 成品保护：已有则拒绝，除非 --force
+    # 2) 成品保护：已有则拒绝，除非 --force。指纹不一致只标记，不重跑。
+    if out_dir.exists() and not args.force:
+        mark_stale_toc(out_dir)
     if out_dir.exists() and any(out_dir.iterdir()):
         if not args.force:
             raise PodError(EX_EXISTS, f"目录已存在且非空：{out_dir}（覆盖请加 --force）")
@@ -556,18 +702,25 @@ def main(argv=None) -> int:
           ("；仅一章「全文」" if toc["source"] == "none" else
            "；" + " / ".join(c["title"][:12] for c in toc["chapters"][:5])))
 
-    # 5) 转录（服务端按需拉起，客户端结束代答回车）；服务端日志放 work 根目录共享，避免锁住单集目录
+    # 5) 转录。未显式传超时则按音频时长计算，取不到时长才退回 7200。
+    duration = probe_audio_duration(audio)
+    budget = compute_transcribe_timeout(duration, args.transcribe_timeout)
+    shown_duration = "未知" if duration is None else f"{duration:.1f}s"
+    print(f"音频时长：{shown_duration}｜本次超时预算：{budget:.0f}s")
     server_log = Path(args.out_dir) / "_podcast2md_server.log"
     server_proc = ensure_server(port, args.server_timeout, server_log)
     try:
-        run_client(audio, logs / "client.log", args.transcribe_timeout)
+        run_client(audio, logs / "client.log", budget)
     finally:
         if server_proc is not None and server_proc.poll() is None:
             log("服务端保持运行（复用加速下次转录）；如需停止请托盘退出或结束 start_server.exe")
 
     # 6) 切分 + 校验 + 落盘
     txt_text = audio.with_suffix(".txt").read_text(encoding="utf-8", errors="replace")
-    cues = parse_srt(audio.with_suffix(".srt"))
+    srt_path = audio.with_suffix(".srt")
+    cues = parse_srt(srt_path)
+    require_srt_txt_contract(cues, txt_text)
+    require_json_tokens(audio.with_suffix(".json"), txt_text)
     md_text = build_chapters_md(toc, cues, txt_text, args.polish)
     v = verify_chapters(md_text, txt_text)
 
@@ -583,6 +736,9 @@ def main(argv=None) -> int:
     toc["slug"] = slug
     toc["transcript"] = {f"{ext}": audio.with_suffix(ext).name for ext in (".txt", ".srt", ".json")}
     toc["verify"] = {"body_lines": v["total"], "literal_miss": v["literal_miss"], "normalized_miss": 0}
+    fingerprint, srt_bytes = srt_fingerprint(srt_path)
+    toc["source_fingerprint"] = fingerprint
+    toc["srt_bytes"] = srt_bytes
     (out_dir / "toc.json").write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
     print("完成。产物：\n  " + "\n  ".join(str(f) for f in [
         audio, out_dir / "toc.json", audio.with_suffix(".txt"),
