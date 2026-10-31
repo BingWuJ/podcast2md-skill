@@ -100,6 +100,100 @@ v2.0.0 之前的提交没有版本号。文末「历史（重建）」按提交�
 
 ---
 
+## v2.1.0 — 2026-10-28
+
+把「核对」从临场动作变成可复用的取证入口，并修掉一个会把「需要登录」误报成「有字幕」的解析缺陷。
+
+### Why：为什么会做这次更新
+
+1. **判据不稳定。** 同一个问题「这集转换对不对」，每次都由 agent 临场换一套写法（这次数条数、下次比 hash、再下次漏掉），结论不可比，也没法回溯。
+2. **论文稿脚本跑不到。** `build_paper_transcript.py` 只存在于 skill 仓库，部署目录里没有，要出论文式文字稿得先 cd 到别处。
+3. **探测会误报。** B 站未登录时 `yt-dlp --list-subs` 只给 `danmaku`（弹幕）加一行 `WARNING: Subtitles are only available when logged in`；旧解析器把 `WARNING:` 当成语言名，状态被判成 `found`，接着会去下载一个不存在的语言轨道。
+
+### Added
+
+- `probe <url> [--json]`：只探测字幕状态，不下载、不转写、不建单集目录。
+- `verify <单集目录> [--json]`：重算全文覆盖与结构（章节数、时间轴、toc 指纹），不改写任何文件。
+- `verify-all [--json]`：批量体检输出根目录下所有含 `toc.json` 的单集。
+- `--json` 输出固定字段：`ok` / `text_source` / `cues` / `body_lines` / `unlocated` / `chapters_md` / `chapters_toc` / `coverage{...}` / `timeline_ok` / `toc_signature_ok` / `polish_inferred` / `reasons` / `warnings`。
+- `--help` 现在列出四个入口；无子命令仍走原有完整流水线。
+- `references/feature-map.md`：入口、产物、探测五态、取证命令、已知坑，带「每次踩坑追加一行」的维护规则。
+
+### Fixed
+
+- `parse_list_subs()` 不再把 `WARNING:` / `ERROR:` / `[...]` 日志行当成语言名，并要求行尾是真实字幕格式（`srt`/`vtt`/`ass`/`json3`/`xml` 等）。B 站未登录的输出现已正确判为 `login_required`，而不是 `found`。
+- 旧 `toc.json` 缺少 `source_fingerprint` 时告警 `toc_signature_absent`，不再静默当作校验通过。
+
+### Changed
+
+- `build_paper_transcript.py` 与 `podcast2md.py` 一样部署到 CapsWriter 根目录，出论文式文字稿不再需要切换目录。
+- `SKILL.md` 新增「核对已有单集」一节，明确「只跑取证入口，不要重跑流水线」。
+- `scripts/PODCAST2MD.md` 补中英文子命令说明与字段含义。
+
+### 兼容性
+
+- 主流水线 CLI 未变，参数和退出码保持。
+- 新增退出码无变化：`0` 通过 / `2` 用法 / `3` 下载或探测 / `4` 服务端 / `5` 转录 / `6` 成品已存在 / `7` 校验失败。子命令复用同一套退出码。
+- 旧单集（无 `text_source` / `source_fingerprint`）仍可通过 `verify`，只是多一条 `toc_signature_absent` 告警。
+
+### 验证
+
+- `python -m unittest test_transcript_checks` → **23 tests OK**（v2.0.0 的 15 条全部保留 + 新增 5 条 verify 子命令 + 3 条真实 B 站 `--list-subs` 回归）。
+
+### 已知局限（2026-10-28 验收暴露）
+
+`verify` 不联网，`scope=local_only`、`web_check=not_verified`。`ok: true` 只意味着**本地硬失败判据未触发**（`reasons` 为空）；
+正文按 `coverage` 与 `polish_inferred` 口径判读，章数 / 指纹另外看对应字段与 `warnings`（它们不会翻转 `ok`）。
+**它不证明章节与当前网页目录一致**。实例：44 号小宇宙单集。运行时刻（2026-10-26 20:33）从页面 HTML 抽到 15 章；
+2026-10-28 网页复核当前页 11 章（本地多出 1680/3151/3508/3719），且 53s 标题 `婉婷`→`Wanting`、909s `千万级`→`亿万级`。
+用同一份 `extract_toc_from_html` 解析当前 HTML，能准确得到这 11 章，说明**当前页解析没有问题**；15→11 的原因仍未定
+（可能是网页后来更新了目录，也可能是历史处理差异），未找到历史网页快照或日志可判定，因此不归因于抽取器。
+尚未做：运行时不归档原始 HTML（两个时刻的 DOM 无法直接出示）；`verify` 不做网页对照（需显式批准后才能加，默认不联网）。
+尚未做：运行时不归档原始 HTML（两时刻的 DOM 无法直接出示）；`verify` 不做网页对照（需你批准后才能加，默认不联网）。
+- `verify-all` → work 下 6 集全部通过，`ok: true`，退出码 0。
+- `verify` 对「非本 CLI 产物」的目录（无 `toc.json`）→ `toc_missing_or_invalid`，退出码 7，不崩溃。
+- `probe` 小宇宙（`44 丨对大厂祛魅后`）→ `confirmed_none`，退出码 0，`slug` 与主流水线一致。
+- `probe` B 站 `BV1mRn66JERc`（未登录）→ `login_required`，`tracks: 0`，退出码 3。
+- **未验证**：未在「真的能拿到平台字幕」的已登录环境跑 `found` 路径；`polish_inferred` 未在真实的 `--polish basic` 单集上验证（目前只用单元测试覆盖）。
+
+---
+
+## v2.2.0 — 2026-11-01
+
+补上「转录历史账本」，并纠正 SKILL.md 里写错的本地音频默认引擎。
+
+### Why：为什么会做这次更新
+
+1. **本地音频走错了引擎。** SKILL.md 的「本地音频」段把 transformers 版 Fun-ASR-Nano 写成默认路径，参考位置写成 `<FunASR目录>\work\full_transcribe.py`——而本机并不存在 `D:\iStall\FunASR\work`：真实脚本与 venv 都在 `FunASR-Nano`，框架仓库 `FunASR` 里两样都没有。照着这段执行会多花 3–4 倍时间，产物质量还更差：同一批 8 分半音频，transformers 版约 5.5 分钟，CapsWriter 冷启动 90 秒、服务端已热 64 秒，且「得到」「橙色」这类热词 transformers 版认不出。
+2. **同一段音频做两遍，结果无从对比。** 换引擎、改切片、补热词之后，没有账本说明「哪一集用什么引擎出的、当时校验过没有」，只能翻 `work` 目录逐个数，也没法回答「这版比上版好在哪」。
+3. **历史记录容易顺手把敏感参数写进库。** 播客与视频链接常带 `?sig=`、`token=`、`SESSDATA=` 之类查询参数，原样记账等于把凭据落到磁盘上。
+
+### Added
+
+- `history` 子命令：`history`（列出中文历史）、`history list [--query 词]`、`history search <词>`、`history register`、`history backfill [--root 目录]`、`history open`。
+- 出稿后自动登记到 `history/ledger.jsonl`，并生成中文清单 `history/转录历史.md`（按时间倒序、可按关键词过滤）。**登记失败不影响出稿**，只打一行告警——账本是旁路，不该成为产物的单点故障。
+- URL 查询串中的敏感参数（`sig`/`signature`/`token`/`access_token`/`SESSDATA`/`cookie`/`auth`/`password`/`secret`/`hmac`/`credential`/`x-amz-*` 等）在记账前脱敏。
+- `scripts/test_history.py`：历史账本的确定性检查，只用临时目录，不写真实 `history`、不碰 `work` 原稿。
+
+### Fixed
+
+- `SKILL.md`「本地音频」段：默认引擎改为 **CapsWriter**（`start_server.exe` + `start_client.exe`，复用 `podcast2md.ensure_server` / `run_client`），并写明两者实测耗时；transformers 版降为 CapsWriter 不可用时的后备，同时纠正 `FunASR` 与 `FunASR-Nano` 的路径混淆。
+- `references/feature-map.md`「坑（追加区）」追加四条：默认引擎选择、`FunASR` 与 `FunASR-Nano` 目录混淆、CapsWriter 会整句重复与跨句拼接漏句、本地音频复用入口 `work\_local_transcribe.py`。
+
+### 同步
+
+本次一并推送此前只存在于本地的 v2.1.0 内容：`probe` / `verify` / `verify-all` 三个只读取证入口、全文覆盖校验、`references/feature-map.md`，以及 `evals/evals.json`。
+
+### 验证
+
+- `python -m unittest test_transcript_checks test_history` → **35 tests OK**（v2.1.0 的 23 条 + 历史账本 12 条）。
+- 引擎对照实测（2026-10-31，两段 8 分半音频）：CapsWriter 冷启动 90 秒出稿、服务端已热 64 秒；同内容 transformers 版约 5.5 分钟。
+
+### 已知局限
+
+- 账本只记「谁出的稿、当时状态」，不记录音频指纹，无法证明某一集后来有没有被重新转录过。
+- `history register` 允许手工补登，因此账本可被人工改写；它是工作记录，不是审计日志。
+
 ## 历史（重建）
 
 以下版本号是按提交时间归并的说明性编号，仓库当时没有 tag。

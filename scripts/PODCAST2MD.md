@@ -34,6 +34,45 @@ python .\podcast2md.py --help
 
 `--polish basic` 不是模型润色：规则可能影响有意义的重复字符或数字，也可能因正文校验失败而退出。需要忠实原稿时使用默认 `off`，保留 `.txt` 后再人工或由 AI 助手校对。`--port` 应与现有 CapsWriter 配置一致，不能单靠此参数更改转录服务地址。
 
+### 核对已有单集（子命令，不重跑流水线）
+
+```powershell
+python .\podcast2md.py probe "单集URL" --json          # 只探测字幕状态，不下载不转写
+python .\podcast2md.py verify "work\<slug>" --json     # 只重算覆盖与结构，不改写文件
+python .\podcast2md.py verify-all --json                # 批量体检 work 下所有含 toc.json 的单集
+```
+
+三个子命令都只读取，不下载、不拉起服务端。`--json` 输出字段固定，方便 agent 判断；不给 `--json` 时输出人读的多行。
+
+| 字段 | 含义 |
+|---|---|
+| `ok` | 只有 `true` 才算通过**本地**校验（不代表与当前网页一致） |
+| `reasons` | 硬失败原因：`toc_missing_or_invalid`、`chapters_md_missing`、`transcript_source_missing`、`coverage_failed` 等 |
+| `warnings` | 可交付但需说明：`timeline_has_unlocated_text`、`toc_signature_mismatch`、`toc_signature_absent`、`chapter_count_mismatch` |
+| `coverage` | 缺失 / 增加 / 重复 / 乱序 / 替换 / 标点 的具体计数，附 `containment_would_pass` 作对照 |
+| `polish_inferred` | toc.json 没记录 `--polish`，这里是按能否通过反推的口径（`off` 或 `basic`），只是推测 |
+| `scope` | 固定为 `local_only`：只比对本地原件与 toc |
+| `web_check` | 固定为 `not_verified`：**不联网**，因此不代表与当前网页目录一致 |
+| `chapter_origin` | 章节列表的来源（`html` / `description` / `yt-dlp` / `none`）；来源是网页时，网页改版后它会过期 |
+
+**`ok: true` 的含义是：本地硬失败判据未触发**（`reasons` 为空）。正文是否与原件一致，按 `coverage` 与 `polish_inferred` 的口径判读；章数与指纹**不在 `ok` 里**，另看 `chapters_md` / `chapters_toc` / `toc_signature_ok` 与 `warnings`（`chapter_count_mismatch`、`toc_signature_mismatch`、`toc_signature_absent` 只进 `warnings`，不会让 `ok` 变 false）。
+**它不证明**：章节与**当前**网页目录一致，也不证明识别准确。章节列表可能与网页不一致，原因未定。
+所以验收时必须分开两句话写：「本地全文覆盖通过」与「与当前网页目录一致（需人工或单独的联网核对）」。
+
+退出码：`0` 通过 / `2` 用法错误 / `3` 下载或探测失败 / `4` 服务端失败 / `5` 转录失败 / `6` 成品已存在 / `7` 校验失败。
+
+### 校对与修订稿（交付前必读）
+
+`chapters.md` 是未校对的 ASR 原文。交付时需声明这一点、列出疑似专名/同音字，并问用户要不要修订稿；`verify` 的 `ok: true` 只说明本地覆盖一致，**不是**“文字无误”。
+
+纠正错字有三条路径，风险从低到高：
+
+1. **单集术语表 + 确定性替换**（推荐）：先用 `--dry-run` 出清单，确认后写 `chapters.corrected.md`，原 `chapters.md` 不动。人名等高误伤项只走这条路。
+2. **客户端全局正则替换** `hot-rule.txt`（格式 `查找 = 替换`，`config_client.py` 的 `hot_rule = True`，由 `file_transcriber.py` 与 `result_processor.py` 在转写后执行）：下次转写生效，**不需要重启服务端**；但它是全局规则，会影响所有转写，只放误伤率极低的串。
+3. **服务端热词** `hot-server.txt`：只改善首次识别，**需要重启 `start_server.exe` 才生效**；用户正在跑转录时禁止重启。不要把 `max_hotwords` 误认为热词总数上限，它是单次召回参数。
+
+错字也可能来自上述任何一层，因此不要未经对照就把错因归给服务端。修订稿不能用 `verify` 验收（它固定读 `chapters.md`），要另用逐项补丁清单 + diff + 原件 sha256 标识 + 未定位文本不变来验收；每条替换规则都要附一条“不应替换”的反例。
+
 ### 流水线
 
 1. **探测**：`yt-dlp -J` 取标题和章节，再单独运行 `--list-subs`。普通 JSON 字幕字段为空不是结论。弹幕不算字幕。状态写入 `subtitle-probe.json`。
@@ -109,6 +148,28 @@ Existing output is protected by default. **`--force` deletes the existing episod
 | `--sub-lang` | Any | Accept only this subtitle language. Other tracks without this one yield `filter_no_match` and stop without ASR |
 
 `--polish basic` is not model-based editing. Its rules can affect meaningful repeated characters or digits, and the result may fail transcript validation. For a faithful source transcript, keep the default `off` and proofread a copy of the `.txt` file manually or with an AI assistant. `--port` must match the existing CapsWriter setup; this flag alone cannot change the transcription service address.
+
+### Inspecting a finished episode (subcommands, no re-run)
+
+```powershell
+python .\podcast2md.py probe "EPISODE_URL" --json          # probe subtitles only
+python .\podcast2md.py verify "work\<slug>" --json         # recompute coverage and structure
+python .\podcast2md.py verify-all --json                    # audit every episode with a toc.json
+```
+
+All three are read-only: no download, no server start, no file rewrite. `--json` prints fixed fields
+(`ok`, `reasons`, `warnings`, `coverage`, `timeline_ok`, `toc_signature_ok`, `polish_inferred`).
+Only `ok: true` counts as delivered. `reasons` is a hard failure; `warnings` means deliverable but
+must be disclosed. `polish_inferred` is a guess derived from which check passes, because `toc.json`
+does not store the original `--polish` value.
+
+`scope` is always `local_only` and `web_check` is always `not_verified`: this command never goes
+online. `ok: true` means only “no local hard-failure rule fired” (`reasons` is empty). Whether the body
+matches the source is read from `coverage` plus `polish_inferred`; chapter counts and fingerprints are
+**not** part of `ok` — read `chapters_md`, `chapters_toc`, `toc_signature_ok` and `warnings`
+(`chapter_count_mismatch`, `toc_signature_mismatch`, `toc_signature_absent` are warnings only and never
+flip `ok`). It does **not** mean the chapters match the current episode page, and the cause of a
+mismatch may be unknown.
 
 ### Pipeline
 

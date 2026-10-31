@@ -24,13 +24,23 @@ import sys
 import time
 from bisect import bisect_right
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 BASE_DIR = Path(__file__).resolve().parent
 SERVER_EXE = BASE_DIR / "start_server.exe"
 CLIENT_EXE = BASE_DIR / "start_client.exe"
 CONFIG_SERVER = BASE_DIR / "config_server.py"
 DEFAULT_WORK = BASE_DIR / "work"
+DEFAULT_HISTORY_DIR = Path(os.environ.get("CAPSWRITER_HOME") or BASE_DIR) / "history"
+HISTORY_LEDGER = "ledger.jsonl"
+HISTORY_CATALOG = "\u8f6c\u5f55\u5386\u53f2.md"
+_SECRET_QUERY_RE = re.compile(
+    r"(sig|signature|token|key|expires?|expire|awsaccesskeyid|x-amz-|sessdata|"
+    r"access_token|cookie|auth|password|secret|hmac|credential)",
+    re.I,
+)
 
 # 退出码：0 成功；2 用法错误；3 下载失败；4 服务端失败；5 转录失败；6 成品已存在；7 切分/校验失败
 EX_OK, EX_USAGE, EX_DOWNLOAD, EX_SERVER, EX_TRANSCRIBE, EX_EXISTS, EX_SPLIT = 0, 2, 3, 4, 5, 6, 7
@@ -407,6 +417,13 @@ def parse_srt(path: Path) -> list[dict]:
 
 UNLOCATED_NOTE = "以下条目没有可靠时间戳，保留原有顺序，不伪造时间。时间轴未通过。"
 IGNORED_LANGS = {"danmaku", "live_chat"}
+# --list-subs 的“Formats”列；只有对这种格式的行才当成一条真轨道。
+# 不加这句会把 WARNING:/ERROR: 这类日志行当成语言名（B 站未登录时就会发生）。
+SUBTITLE_FORMATS = {
+    "srt", "vtt", "ass", "ssa", "json", "json3", "ttml", "dfxp",
+    "srv1", "srv2", "srv3", "sami", "lrc", "xml",
+}
+LOG_LINE_PREFIXES = ("warning", "error", "[", ">>", "language")
 LANG_PREFERENCE = ["zh-hans", "zh-cn", "zh", "chi", "zh-hant", "zh-tw", "zh-hk"]
 
 
@@ -749,6 +766,7 @@ def json_subtitle_langs(info: dict) -> list[str]:
 def parse_list_subs(text: str) -> list[dict]:
     tracks, section = [], None
     for line in text.splitlines():
+        stripped = line.strip()
         if "Available subtitles for" in line:
             section = "manual"
             continue
@@ -758,12 +776,15 @@ def parse_list_subs(text: str) -> list[dict]:
         if "has no subtitles" in line or "has no automatic captions" in line:
             section = None
             continue
-        if section is None or not line.strip() or line.strip().startswith("Language") or line.startswith("["):
+        if section is None or not stripped:
             continue
-        lang = line.split()[0]
-        if lang.lower() == "language":
+        if stripped.lower().startswith(LOG_LINE_PREFIXES):
             continue
-        tracks.append({"lang": lang, "automatic": section == "auto", "formats": line.split()[-1]})
+        parts = stripped.split()
+        # 真轨道形如 “zh-Hans  srt” 或 “danmaku  xml”；日志行无论如何也不具有这个形状。
+        if len(parts) < 2 or parts[-1].lower() not in SUBTITLE_FORMATS:
+            continue
+        tracks.append({"lang": parts[0], "automatic": section == "auto", "formats": parts[-1]})
     return tracks
 
 
@@ -887,7 +908,8 @@ def probe_block_message(status: str) -> str:
 
 def write_chapters(out_dir: Path, toc: dict, slug: str, cues: list[dict], unlocated: list[str],
                    polish: str, source_path: Path, origin: dict, asr: bool,
-                   txt_text: str | None = None, json_path: Path | None = None) -> int:
+                   txt_text: str | None = None, json_path: Path | None = None,
+                   input_url: str | None = None) -> int:
     """全文覆盖不通过就不写 chapters.md。包含检查只作对照，不能单独放行。"""
     if txt_text is None:
         txt_text = "\n".join(cue.get("text") or "" for cue in cues)
@@ -932,6 +954,20 @@ def write_chapters(out_dir: Path, toc: dict, slug: str, cues: list[dict], unloca
     toc["srt_bytes"] = source_bytes
     (out_dir / "toc.json").write_text(json.dumps(toc, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"完成。文字来源：{origin['text_source']}\n  {out_dir / 'chapters.md'}\n  {source_path}")
+    canonical = toc.get("url") or ""
+    original = input_url or canonical
+    history_remember(
+        title=toc.get("title") or out_dir.name,
+        source=canonical or original,
+        source_input=original,
+        source_kind="url",
+        final_path=out_dir / "chapters.md",
+        episode_dir=out_dir,
+        engine=origin.get("text_source") or "",
+        latest_status="completed",
+        verification="unverified",
+        processed_at=_stamp_now(),
+    )
     return EX_OK
 
 
@@ -1014,7 +1050,7 @@ def main(argv=None) -> int:
                 "text_source": source_label(kind, chosen["lang"]),
                 "generator": "podcast2md.py（平台字幕原件，未跑 CapsWriter）",
                 "probe_note": probe["status"],
-            }, asr=False)
+            }, asr=False, input_url=args.url)
 
     if probe["status"] != "confirmed_none":
         raise PodError(EX_DOWNLOAD, probe_block_message("request_failed"))
@@ -1056,13 +1092,757 @@ def main(argv=None) -> int:
             "text_source": source_label("本机ASR"),
             "generator": "podcast2md.py（CapsWriter-Offline / fun_asr_nano）",
             "probe_note": "confirmed_none；已明确选择音频 ASR",
-        }, asr=True, txt_text=txt_text, json_path=audio.with_suffix(".json"))
+        }, asr=True, txt_text=txt_text, json_path=audio.with_suffix(".json"),
+        input_url=args.url)
+
+
+# ---------------------------------------------------------------- 子命令
+#
+# probe / verify / verify-all 是给 agent（和人）复用的固定取证入口。
+# 它们不下载音频、不拉起服务端、不改写单集目录；输出字段固定，退出码与主流程一致。
+
+
+def _emit(use_json: bool, payload: dict, lines: list[str]) -> None:
+    """--json 只打机器可读对象；否则打人读的多行。"""
+    if use_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        for line in lines:
+            print(line)
+
+
+def _load_json_file(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def find_transcript_source(out_dir: Path, toc: dict) -> Path | None:
+    """字幕路径优先 original-subs/，其次 <slug>.srt，最后目录下任一个 srt。"""
+    subs_dir = out_dir / "original-subs"
+    if subs_dir.is_dir():
+        subs = sorted(subs_dir.glob("*.srt"))
+        if subs:
+            return subs[0]
+    slug = toc.get("slug")
+    if isinstance(slug, str) and slug:
+        candidate = out_dir / f"{slug}.srt"
+        if candidate.exists():
+            return candidate
+    any_srt = sorted(out_dir.glob("*.srt"))
+    return any_srt[0] if any_srt else None
+
+
+def verify_episode(out_dir: Path) -> dict:
+    """重算一个已产出单集的全文覆盖，不依赖当初跑流水线时的进程状态。
+
+    toc.json 里没有记录 --polish，所以依次试 off / basic 两种口径，能通过的那种
+    就记在 polish_inferred 里。这只是推测，不当成原始参数。
+    """
+    result = {
+        "ok": False, "episode": out_dir.name, "slug": None, "text_source": None,
+        "source_file": None, "cues": 0, "unlocated": 0, "body_lines": 0,
+        "chapters_md": 0, "chapters_toc": 0, "timeline_ok": False,
+        "toc_signature_ok": None, "polish_inferred": None,
+        "scope": "local_only", "web_check": "not_verified", "chapter_origin": None,
+        "coverage": None, "reasons": [], "warnings": [],
+    }
+    if not out_dir.is_dir():
+        result["reasons"].append("episode_dir_missing")
+        return result
+
+    toc = _load_json_file(out_dir / "toc.json")
+    if toc is None:
+        result["reasons"].append("toc_missing_or_invalid")
+        return result
+
+    chapters_path = out_dir / "chapters.md"
+    if not chapters_path.exists():
+        result["reasons"].append("chapters_md_missing")
+        return result
+
+    result["slug"] = toc.get("slug")
+    text_source = toc.get("text_source") or {}
+    result["text_source"] = text_source.get("kind")
+    result["chapters_toc"] = len(toc.get("chapters") or [])
+    # 章节列表是从 html / description / yt-dlp 哪里抽的：决定它会有多快过期
+    result["chapter_origin"] = toc.get("source")
+
+    md_text = chapters_path.read_text(encoding="utf-8", errors="replace")
+    derived = chapter_body_units(md_text)
+    result["body_lines"] = len(derived)
+    result["chapters_md"] = sum(1 for line in md_text.splitlines() if line.startswith("## "))
+
+    source = find_transcript_source(out_dir, toc)
+    if source is None:
+        result["reasons"].append("transcript_source_missing")
+        return result
+    result["source_file"] = source.relative_to(out_dir).as_posix()
+
+    cues, unlocated = parse_srt_document(source.read_text(encoding="utf-8-sig", errors="replace"))
+    result["cues"] = len(cues)
+    result["unlocated"] = len(unlocated)
+    if not cues and not unlocated:
+        result["reasons"].append("transcript_source_empty")
+        return result
+
+    base_units = cue_source_units(cues, unlocated)
+    report = None
+    for faithful, polish in ((True, "off"), (False, "off"), (False, "basic")):
+        units = base_units
+        if polish == "basic":
+            units = text_units(apply_polish("\n".join(base_units), polish))
+        candidate = coverage_report(units, derived, faithful=faithful)
+        if report is None:
+            report = candidate  # 保留最保守的一轮作为失败证据
+        if candidate["ok"]:
+            report = candidate
+            result["polish_inferred"] = polish
+            break
+    if result["polish_inferred"] is None:
+        result["polish_inferred"] = "off"
+
+    result["coverage"] = {
+        "missing": report["missing_count"], "added": report["added_count"],
+        "duplicate": report["duplicate_count"], "reordered": report["reordered"],
+        "replaced": report["replaced_count"], "punctuation": report["punctuation_count"],
+        "content_ok": report["content_ok"],
+        "containment_would_pass": report["containment_would_pass"],
+    }
+    result["timeline_ok"] = not unlocated
+
+    stored_fp = toc.get("source_fingerprint")
+    current_fp, _ = srt_fingerprint(source)
+    if isinstance(stored_fp, str):
+        result["toc_signature_ok"] = stored_fp == current_fp
+    else:
+        result["warnings"].append("toc_signature_absent")
+
+    if not report["ok"]:
+        result["reasons"].append("coverage_failed")
+    if not result["timeline_ok"]:
+        result["warnings"].append("timeline_has_unlocated_text")
+    if result["toc_signature_ok"] is False:
+        result["warnings"].append("toc_signature_mismatch")
+    if result["chapters_md"] != result["chapters_toc"]:
+        result["warnings"].append("chapter_count_mismatch")
+
+    result["ok"] = not result["reasons"]
+    return result
+
+
+def _verify_lines(r: dict) -> list[str]:
+    head = f"{'通过' if r['ok'] else '不通过'}｜{r['episode']}"
+    if r["coverage"] is None:
+        return [head, "原因：" + ", ".join(r["reasons"])]
+    c = r["coverage"]
+    lines = [
+        head,
+        "校验范围：仅本地原件与 toc（web 未核验，不代表与当前网页目录一致）",
+        f"文字来源：{r['text_source']}｜章节来源：{r['chapter_origin']}｜源文件：{r['source_file']}",
+        f"字幕条数：{r['cues']}｜正文行数：{r['body_lines']}｜未定位：{r['unlocated']}",
+        f"章节：chapters.md {r['chapters_md']} 章 / toc.json {r['chapters_toc']} 章",
+        ("覆盖：" + f"缺失 {c['missing']}，增加 {c['added']}，重复 {c['duplicate']}，"
+         f"乱序 {c['reordered']}，替换 {c['replaced']}，标点 {c['punctuation']}"),
+        ("时间轴：" + ("通过" if r["timeline_ok"] else "未通过")
+         + "｜toc 指纹：" + ("一致" if r["toc_signature_ok"] else ("不一致" if r["toc_signature_ok"] is False else "无记录"))
+         + f"｜润色推断：{r['polish_inferred']}"),
+    ]
+    lines += [f"警告：{w}" for w in r["warnings"]]
+    lines += [f"原因：{x}" for x in r["reasons"]]
+    return lines
+
+
+def cmd_probe(argv=None) -> int:
+    """只探测字幕状态：不下载音频、不转写、不建单集目录。"""
+    p = argparse.ArgumentParser(
+        prog="podcast2md.py probe",
+        description="只探测字幕状态，不下载、不转写（对应主流程第 3 步）")
+    p.add_argument("url", help="单集页面或音频直链 URL")
+    p.add_argument("--json", action="store_true", help="输出固定字段 JSON，供 agent 读取")
+    p.add_argument("--out-dir", default=str(DEFAULT_WORK), help="日志根目录（默认 <脚本目录>/work）")
+    p.add_argument("--sub-lang", default=None, help="只接受该语言字幕轨")
+    args = p.parse_args(argv)
+
+    out_root = Path(args.out_dir).resolve()
+    logs = out_root / "logs"
+    base = {
+        "ok": False, "status": None, "json_subtitle_field_empty": None,
+        "tracks": 0, "chosen_lang": None, "chosen_automatic": None,
+        "slug": None, "title": None, "part": None, "exit_code": EX_DOWNLOAD,
+    }
+    try:
+        info = ytdlp_dump_info(args.url, logs / "_podcast2md_probe_info.json")
+        probe = probe_subtitles(args.url, info, logs / "_podcast2md_probe_list-subs.log", args.sub_lang)
+    except PodError as e:
+        base.update({"reason": f"inspect_failed: {e}"})
+        _emit(args.json, base, [f"探测失败（exit {e.code}）：{e}"])
+        return e.code
+
+    chosen = probe.get("chosen") or {}
+    blocked = probe["status"] in {"login_required", "request_failed", "filter_no_match"}
+    payload = {
+        **base,
+        "ok": not blocked,
+        "status": probe["status"],
+        "json_subtitle_field_empty": probe["json_subtitle_field_empty"],
+        "tracks": len(probe.get("tracks") or []),
+        "chosen_lang": chosen.get("lang"),
+        "chosen_automatic": chosen.get("automatic"),
+        "slug": slugify(info.get("title") or "", info.get("id") or args.url),
+        "title": info.get("title"),
+        "part": probe.get("part"),
+        "exit_code": EX_DOWNLOAD if blocked else EX_OK,
+    }
+    kind = "平台AI" if payload["chosen_automatic"] else ("普通CC" if payload["chosen_lang"] else "无")
+    lines = [
+        f"状态：{payload['status']}",
+        f"JSON 字幕字段为空：{payload['json_subtitle_field_empty']}（不作结论）",
+        f"可用轨道：{payload['tracks']}｜选中：{payload['chosen_lang']}（{kind}）",
+        f"slug：{payload['slug']}",
+    ]
+    if blocked:
+        lines.append(probe_block_message(payload["status"]))
+    _emit(args.json, payload, lines)
+    return payload["exit_code"]
+
+
+def cmd_verify(argv=None) -> int:
+    """校验一个已完成单集的产物，可反复执行。"""
+    p = argparse.ArgumentParser(
+        prog="podcast2md.py verify",
+        description="重算单个单集的全文覆盖与结构，不下载、不转写、不改写文件")
+    p.add_argument("episode_dir", help="单集目录（work/<slug>）")
+    p.add_argument("--json", action="store_true", help="输出固定字段 JSON")
+    args = p.parse_args(argv)
+    result = verify_episode(Path(args.episode_dir))
+    _emit(args.json, result, _verify_lines(result))
+    return EX_OK if result["ok"] else EX_SPLIT
+
+
+def cmd_verify_all(argv=None) -> int:
+    """批量体检输出根目录下所有含 toc.json 的单集。"""
+    p = argparse.ArgumentParser(
+        prog="podcast2md.py verify-all",
+        description="批量校验输出根目录下所有单集，不下载、不转写、不改写文件")
+    p.add_argument("--json", action="store_true", help="输出固定字段 JSON")
+    p.add_argument("--out-dir", default=str(DEFAULT_WORK), help="输出根目录（默认 <脚本目录>/work）")
+    args = p.parse_args(argv)
+
+    root = Path(args.out_dir).resolve()
+    if not root.is_dir():
+        payload = {"ok": False, "root": str(root), "total": 0, "passed": 0, "failed": 0,
+                   "episodes": [], "reasons": ["out_dir_missing"]}
+        _emit(args.json, payload, [f"目录不存在：{root}"])
+        return EX_SPLIT
+
+    dirs = [d for d in sorted(root.iterdir()) if d.is_dir() and (d / "toc.json").exists()]
+    episodes = [verify_episode(d) for d in dirs]
+    failed = [e for e in episodes if not e["ok"]]
+    payload = {"ok": not failed, "root": str(root), "total": len(episodes),
+               "passed": len(episodes) - len(failed), "failed": len(failed),
+               "episodes": episodes, "reasons": []}
+    lines = [
+        f"{'通过' if e['ok'] else '不通过'}｜{e['episode']}｜"
+        f"{'原因 ' + ', '.join(e['reasons']) if e['reasons'] else '覆盖一致'}｜"
+        f"{'时间轴OK' if e['timeline_ok'] else '时间轴有未定位文本'}"
+        for e in episodes
+    ]
+    lines.append(f"合计 {len(episodes)} 集：通过 {len(episodes) - len(failed)}，不通过 {len(failed)}")
+    _emit(args.json, payload, lines)
+    return EX_OK if not failed else EX_SPLIT
+
+
+def history_dir() -> Path:
+    raw = os.environ.get("PODCAST2MD_HISTORY")
+    if raw:
+        return Path(raw).resolve()
+    home = os.environ.get("CAPSWRITER_HOME")
+    root = Path(home).resolve() if home else BASE_DIR
+    return (root / "history").resolve()
+
+
+def sanitize_source(raw: str) -> str:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if not re.match(r"https?://", text, re.I):
+        return text
+    parsed = urlparse(text)
+    host = parsed.hostname or ""
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    kept = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+            if k and not _SECRET_QUERY_RE.search(k)]
+    return urlunparse((parsed.scheme, host, parsed.path, "", urlencode(kept), ""))
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+
+def sanitize_text_urls(text: str) -> str:
+    """清掉标题/错误信息里嵌着的签名 URL，不把异常原文原样落盘。"""
+    return _URL_IN_TEXT.sub(lambda m: sanitize_source(m.group(0)), str(text or ""))
+
+
+def _resolve_stored_path(raw) -> str:
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve())
+    except OSError:
+        return str(raw)
+
+
+def _history_id(source_kind: str, source: str, final_path: str) -> str:
+    if source_kind == "url":
+        key = "url|" + sanitize_source(source)
+    else:
+        raw = source or final_path or ""
+        try:
+            raw = str(Path(raw).resolve()) if raw else ""
+        except OSError:
+            raw = raw or ""
+        key = "local|" + raw
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def file_uri(path: str) -> str:
+    if not path:
+        return ""
+    try:
+        return Path(path).resolve().as_uri()
+    except OSError:
+        return ""
+
+
+def _stamp_now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _stamp_mtime(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def load_history_rows() -> list[dict]:
+    path = history_dir() / HISTORY_LEDGER
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def display_history_status(row: dict) -> str:
+    final = str(row.get("final_path") or "")
+    exists = bool(final) and Path(final).exists()
+    latest = row.get("latest_status") or "failed"
+    ver = row.get("verification") or "unverified"
+    if not exists:
+        if final or latest == "completed":
+            return "最终稿缺失"
+        return "失败（无可用稿）"
+    if latest == "failed":
+        return "有旧稿，最近一次失败"
+    if ver == "local_ok":
+        return "已生成（本地结构校验通过）"
+    if ver == "local_failed":
+        return "已生成（本地结构校验未通过）"
+    return "已生成（未校验）"
+
+
+def display_history_time(row: dict) -> str:
+    stamp = row.get("processed_at") or ""
+    if not stamp:
+        return "未知"
+    if row.get("processed_at_inferred"):
+        return f"{stamp}（文件时间推断）"
+    return stamp
+
+
+def write_history_catalog(rows: list[dict]) -> Path:
+    root = history_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    catalog = root / HISTORY_CATALOG
+    def sort_key(row):
+        stamp = row.get("processed_at") or ""
+        return (1 if stamp else 0, stamp)
+    ordered = sorted(rows, key=sort_key, reverse=True)
+    lines = [
+        "# 转录历史",
+        "",
+        f"> 清单文件：`{catalog}`",
+        "> 这不是人工校对记录。本地结构校验通过 \u2260 内容已校对。",
+        "> 失败重跑会保留已有最终稿路径，并标成「有旧稿，最近一次失败」。",
+        "",
+        "| 处理时间 | 状态 | 标题 | 来源 | 最终稿 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in ordered:
+        title = (row.get("title") or "（无标题）").replace("|", "\\|")
+        source = (row.get("source") or "").replace("|", "\\|")
+        final = row.get("final_path") or ""
+        uri = file_uri(final) if final else ""
+        final_cell = f"[打开]({uri}) `{final}`" if uri else (f"`{final}`" if final else "（无）")
+        lines.append(
+            f"| {display_history_time(row)} | {display_history_status(row)} | "
+            f"{title} | {source} | {final_cell} |"
+        )
+    if not ordered:
+        lines.append("| （空） | | 还没有登记 | | |")
+    lines.append("")
+    catalog.write_text("\n".join(lines), encoding="utf-8")
+    return catalog
+
+
+def save_history_rows(rows: list[dict]) -> Path:
+    root = history_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    ledger = root / HISTORY_LEDGER
+    tmp = ledger.with_suffix(".jsonl.tmp")
+    body = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(ledger)
+    write_history_catalog(rows)
+    return ledger
+
+
+def history_remember(**fields) -> dict | None:
+    """登记或更新一条历史。失败不得抹掉仍存在的旧最终稿。
+    strict=False：写账失败只警告，不影响正文交付。
+    strict=True：显式 history register 必须失败退出。"""
+    strict = bool(fields.pop("strict", False))
+    try:
+        raw_source = str(fields.get("source") or "")
+        source_kind = fields.get("source_kind") or (
+            "url" if re.match(r"https?://", raw_source, re.I) else "local")
+        source = sanitize_source(raw_source) if source_kind == "url" else _resolve_stored_path(raw_source)
+        source_input = sanitize_source(str(fields.get("source_input") or raw_source)) if source_kind == "url" else ""
+        final_path = _resolve_stored_path(fields.get("final_path") or "")
+        latest = fields.get("latest_status") or "failed"
+        if latest not in {"completed", "failed"}:
+            latest = "failed"
+        entry_id = fields.get("id") or _history_id(source_kind, source, final_path)
+        rows = load_history_rows()
+        existing = next((row for row in rows if row.get("id") == entry_id), None)
+        if existing is None and source_kind == "url":
+            needles = {item for item in (source, source_input, sanitize_source(raw_source)) if item}
+            for row in rows:
+                if row.get("source_kind") != "url":
+                    continue
+                keys = {row.get("source") or ""}
+                keys.update(row.get("aliases") or [])
+                if needles & {item for item in keys if item}:
+                    existing = row
+                    entry_id = row["id"]
+                    break
+        if latest == "failed" and existing:
+            old_final = existing.get("final_path") or ""
+            if (not final_path or not Path(final_path).exists()) and old_final and Path(old_final).exists():
+                final_path = old_final
+                fields["verification"] = existing.get("verification") or "unverified"
+        verification = fields.get("verification") or "unverified"
+        if latest == "completed":
+            verification = fields.get("verification") or "unverified"
+        inferred = bool(fields.get("processed_at_inferred"))
+        processed_at = fields.get("processed_at")
+        if processed_at is None:
+            if inferred and final_path and Path(final_path).exists():
+                processed_at = _stamp_mtime(Path(final_path))
+            else:
+                processed_at = ""
+        aliases = []
+        if source_kind == "url":
+            existing_aliases = ((existing or {}).get("aliases") or [])
+            for item in [*existing_aliases, source, source_input, sanitize_source(raw_source)]:
+                item = sanitize_source(item) if item else ""
+                if item and item not in aliases:
+                    aliases.append(item)
+        if latest == "completed" and source:
+            stored_source = source
+        else:
+            stored_source = ((existing or {}).get("source") or source or "")
+        row = {
+            "id": entry_id,
+            "title": sanitize_text_urls(fields.get("title") or (existing or {}).get("title") or ""),
+            "source": stored_source,
+            "source_kind": source_kind,
+            "aliases": aliases,
+            "processed_at": processed_at,
+            "processed_at_inferred": inferred,
+            "latest_status": latest,
+            "final_path": final_path,
+            "verification": verification,
+            "engine": fields.get("engine") or (existing or {}).get("engine") or "",
+            "episode_dir": _resolve_stored_path(fields.get("episode_dir") or (existing or {}).get("episode_dir") or ""),
+            "last_error": sanitize_text_urls(fields.get("last_error") or "")[:200] if latest == "failed" else "",
+            "notes": sanitize_text_urls(fields.get("notes") or (existing or {}).get("notes") or ""),
+        }
+        if existing:
+            rows = [row if item.get("id") == entry_id else item for item in rows]
+        else:
+            rows.append(row)
+        save_history_rows(rows)
+        return row
+    except PodError:
+        raise
+    except Exception as exc:
+        if strict:
+            raise PodError(EX_SPLIT, f"历史登记失败：{exc}") from exc
+        print(f"[podcast2md] 历史登记失败（不影响出稿）：{exc}", file=sys.stderr)
+        return None
+
+
+def history_lines(rows: list[dict], query: str = "") -> list[str]:
+    needle = (query or "").strip().lower()
+    catalog = history_dir() / HISTORY_CATALOG
+    lines = [f"历史清单：{catalog}", ""]
+    shown = 0
+    def sort_key(row):
+        stamp = row.get("processed_at") or ""
+        return (1 if stamp else 0, stamp)
+    for row in sorted(rows, key=sort_key, reverse=True):
+        blob = " ".join([
+            str(row.get("title") or ""), str(row.get("source") or ""),
+            str(row.get("final_path") or ""),
+        ]).lower()
+        if needle and needle not in blob:
+            continue
+        shown += 1
+        lines.append(
+            f"{display_history_time(row)}  {display_history_status(row)}  "
+            f"{row.get('title') or '（无标题）'}\n  来源：{row.get('source') or '（空）'}\n"
+            f"  最终稿：{row.get('final_path') or '（无）'}"
+        )
+    if shown == 0:
+        lines.append("没有匹配的历史。" if needle else "还没有登记。")
+    return lines
+
+
+def _backfill_episode(folder: Path) -> str:
+    """只新增或补空缺。不得把更可信的失败尝试改写成已生成。"""
+    chapters = folder / "chapters.md"
+    if not chapters.exists():
+        return "skip"
+    toc = _load_json_file(folder / "toc.json") or {}
+    title = toc.get("title") or folder.name
+    source = toc.get("url") or str(folder)
+    kind = "url" if re.match(r"https?://", str(source), re.I) else "local"
+    if kind == "url":
+        source = sanitize_source(str(source))
+    entry_id = _history_id(kind, str(source), str(chapters))
+    rows = load_history_rows()
+    existing = next((row for row in rows if row.get("id") == entry_id), None)
+    if existing is None:
+        report = verify_episode(folder) if (folder / "toc.json").exists() else {"ok": False}
+        verification = "local_ok" if report.get("ok") else (
+            "local_failed" if (folder / "toc.json").exists() else "unverified")
+        row = history_remember(
+            title=title,
+            source=source,
+            source_kind=kind,
+            final_path=chapters,
+            episode_dir=folder,
+            engine=(toc.get("text_source") or {}).get("kind") or "backfill",
+            latest_status="completed",
+            verification=verification,
+            processed_at=_stamp_mtime(chapters),
+            processed_at_inferred=True,
+            notes="回填；处理时间由文件时间推断",
+            strict=True,
+        )
+        if row is None:
+            raise PodError(EX_SPLIT, "历史补录失败")
+        return "new"
+    changed = False
+    if not existing.get("title") and title:
+        existing["title"] = title
+        changed = True
+    if not existing.get("source") and source:
+        existing["source"] = source
+        changed = True
+    if not existing.get("final_path") and chapters.exists():
+        existing["final_path"] = str(chapters)
+        changed = True
+    if not existing.get("episode_dir"):
+        existing["episode_dir"] = str(folder)
+        changed = True
+    if not existing.get("processed_at"):
+        existing["processed_at"] = _stamp_mtime(chapters)
+        existing["processed_at_inferred"] = True
+        changed = True
+    if existing.get("latest_status") != "failed" and (
+            not existing.get("verification") or existing.get("verification") == "unverified"):
+        if (folder / "toc.json").exists():
+            report = verify_episode(folder)
+            existing["verification"] = "local_ok" if report.get("ok") else "local_failed"
+            changed = True
+    if changed:
+        try:
+            save_history_rows([existing if row.get("id") == entry_id else row for row in rows])
+        except Exception as exc:
+            raise PodError(EX_SPLIT, f"历史补录失败：{exc}") from exc
+        return "filled"
+    return "kept"
+
+
+def cmd_history(argv=None) -> int:
+    argv = list(argv or [])
+    action = argv[0] if argv else "list"
+    rest = argv[1:] if argv else []
+    if action in {"-h", "--help"}:
+        print("用法：\n"
+              "  podcast2md.py history                 列出中文历史\n"
+              "  podcast2md.py history list [--query 词]\n"
+              "  podcast2md.py history search <词>\n"
+              "  podcast2md.py history register --title T --source S --final 路径\n"
+              "      [--status completed|failed] [--engine E] [--notes 说明]\n"
+              "  podcast2md.py history backfill [--root 目录]\n"
+              "  podcast2md.py history open                打开中文清单\n"
+              "\n默认清单：" + str(history_dir() / HISTORY_CATALOG))
+        return EX_OK
+    if action == "open":
+        catalog = write_history_catalog(load_history_rows())
+        os.startfile(str(catalog))
+        print(f"已打开：{catalog}")
+        return EX_OK
+    if action == "search":
+        query = " ".join(rest).strip()
+        print("\n".join(history_lines(load_history_rows(), query)))
+        return EX_OK
+    if action == "register":
+        p = argparse.ArgumentParser(prog="podcast2md.py history register")
+        p.add_argument("--title", default="")
+        p.add_argument("--source", required=True)
+        p.add_argument("--final", default="")
+        p.add_argument("--status", choices=["completed", "failed"], default="completed")
+        p.add_argument("--engine", default="manual")
+        p.add_argument("--notes", default="")
+        p.add_argument("--processed-at", default=None)
+        p.add_argument("--inferred", action="store_true")
+        args = p.parse_args(rest)
+        final = Path(args.final) if args.final else None
+        if args.status == "completed" and (final is None or not final.exists()):
+            raise PodError(EX_USAGE, "status=completed 时必须提供已存在的 --final")
+        kind = "url" if re.match(r"https?://", args.source, re.I) else "local"
+        verification = "unverified"
+        if args.status == "completed" and final and final.name == "chapters.md":
+            episode = final.parent
+            if (episode / "toc.json").exists():
+                report = verify_episode(episode)
+                verification = "local_ok" if report["ok"] else "local_failed"
+        row = history_remember(
+            title=args.title or (final.stem if final else args.source),
+            source=args.source,
+            source_kind=kind,
+            final_path=final or "",
+            episode_dir=final.parent if final else "",
+            engine=args.engine,
+            latest_status=args.status,
+            verification=verification,
+            processed_at=args.processed_at,
+            processed_at_inferred=args.inferred,
+            notes=args.notes,
+            last_error="" if args.status == "completed" else (args.notes or "failed"),
+            strict=True,
+        )
+        if row is None:
+            raise PodError(EX_SPLIT, "历史登记失败")
+        print("已登记：" + display_history_status(row) + "\n  " + str(history_dir() / HISTORY_CATALOG))
+        return EX_OK
+    if action == "backfill":
+        p = argparse.ArgumentParser(prog="podcast2md.py history backfill")
+        p.add_argument("--root", action="append", default=[])
+        args = p.parse_args(rest)
+        roots = [Path(item) for item in args.root] if args.root else [DEFAULT_WORK]
+        count = 0
+        for root in roots:
+            if not root.is_dir():
+                print(f"跳过不存在的目录：{root}")
+                continue
+            children = [root] if (root / "chapters.md").exists() else []
+            children += [d for d in sorted(root.iterdir()) if d.is_dir() and d.name not in {"_reports", "logs"}]
+            for folder in children:
+                result = _backfill_episode(folder)
+                if result in {"new", "filled"}:
+                    count += 1
+        print(f"回填 {count} 条（新增或补空缺）。清单：{history_dir() / HISTORY_CATALOG}")
+        return EX_OK
+    query = ""
+    if action == "list":
+        p = argparse.ArgumentParser(prog="podcast2md.py history list")
+        p.add_argument("--query", default="")
+        p.add_argument("--json", action="store_true")
+        args = p.parse_args(rest)
+        rows = load_history_rows()
+        if args.json:
+            print(json.dumps({"catalog": str(history_dir() / HISTORY_CATALOG), "rows": rows}, ensure_ascii=False, indent=2))
+            return EX_OK
+        query = args.query
+    elif action != "list":
+        raise PodError(EX_USAGE, f"未知 history 动作：{action}")
+    print("\n".join(history_lines(load_history_rows(), query)))
+    return EX_OK
+
+
+def _pipeline_argv(argv: list[str]) -> bool:
+    return bool(argv) and argv[0] not in {"probe", "verify", "verify-all", "history", "-h", "--help"}
+
+
+def _argv_url(argv: list[str]) -> str:
+    for item in argv:
+        if item.startswith("http://") or item.startswith("https://"):
+            return item
+    return ""
+
+
+SUBCOMMANDS = {"probe": cmd_probe, "verify": cmd_verify, "verify-all": cmd_verify_all, "history": cmd_history}
+
+
+def cli(argv=None) -> int:
+    """分发：无子命令走进原有完整流水线，有则进对应取证入口。"""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in SUBCOMMANDS:
+        return SUBCOMMANDS[argv[0]](argv[1:])
+    if argv and argv[0] in {"-h", "--help"}:
+        print("用法：\n"
+              "  podcast2md.py <url>                       完整流水线（探测 → 字幕或 ASR → 切章 → 校验）\n"
+              "  podcast2md.py probe <url> [--json]        只探测字幕状态，不下载不转写\n"
+              "  podcast2md.py verify <单集目录> [--json]  只重算单个单集的覆盖与结构\n"
+              "  podcast2md.py verify-all [--json]         批量体检 work 下所有单集\n"
+              "  podcast2md.py history                     查看中文转录历史\n"
+              "  podcast2md.py history search <词>         搜索历史\n"
+              "  podcast2md.py history register ...        登记本地音频等最终稿\n"
+              "\n提示：完整流水的参数用 'podcast2md.py <url> --help' 查看。\n"
+              "退出码：0 通过；2 用法错误；3 下载或探测失败；4 服务端失败；5 转录失败；6 成品已存在；7 校验失败")
+        return EX_OK
+    return main(argv)
 
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(cli())
     except PodError as e:
+        argv = sys.argv[1:]
+        if e.code != EX_EXISTS and _pipeline_argv(argv):
+            history_remember(
+                title="",
+                source=_argv_url(argv),
+                source_kind="url" if _argv_url(argv) else "local",
+                final_path="",
+                latest_status="failed",
+                last_error=str(e),
+                notes="流水线失败",
+                processed_at=_stamp_now(),
+            )
         print(f"[podcast2md] 失败（exit {e.code}）：{e}", file=sys.stderr)
         sys.exit(e.code)
     except KeyboardInterrupt:

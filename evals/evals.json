@@ -1,0 +1,23 @@
+{
+  "skill_name": "podcast2md",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "https://www.xiaoyuzhoufm.com/episode/6adb068cc96c8942ec110ee1 转成文字稿",
+      "expected_output": "只在 D:\\iStall\\CapsWriter-Offline\\work\\<slug>\\ 产出 chapters.md。不写论文式文字稿，不写到当前项目 doc。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "把这一集按网页目录写成论文式文字稿，前面加摘要卡片，正文按章节分段。",
+      "expected_output": "在同一集目录写摘要卡片.md 和 论文式文字稿.md。摘要只来自 chapters.md。章节标题用网页目录。正文不改识别词。不复制到项目目录。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "论文稿写好后放到当前项目的 doc 目录，方便我看。",
+      "expected_output": "拒绝另存。说明成品已经在该集 work 目录，不留第二份。",
+      "files": []
+    }
+  ]
+}

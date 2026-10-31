@@ -91,5 +91,119 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(unlocated, ["丢失会错"])
 
 
+class VerifySubcommandTests(unittest.TestCase):
+    """verify 子命令自己也要有测试，否则它就是下一个“包含检查”。"""
+
+    def make_episode(self, tmp, drop_tail=False, with_toc=True, name="ep"):
+        import json, pathlib
+        ep = pathlib.Path(tmp) / name
+        ep.mkdir(parents=True, exist_ok=True)
+        srt = (
+            "1\n00:00:01,000 --> 00:00:02,000\n甲\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n乙\n"
+        )
+        srt_path = ep / "ep.srt"
+        srt_path.write_text(srt, encoding="utf-8")
+        body = "甲\n" if drop_tail else "甲\n乙\n"
+        (ep / "chapters.md").write_text(
+            f"# 测试\n\n## 0:00:00 全文\n\n{body}", encoding="utf-8")
+        if with_toc:
+            fingerprint, size = p.srt_fingerprint(srt_path)
+            (ep / "toc.json").write_text(json.dumps({
+                "slug": "ep",
+                "chapters": [{"start": 0, "title": "全文"}],
+                "text_source": {"kind": "本机ASR", "lang": None, "probe_status": "confirmed_none"},
+                "source_fingerprint": fingerprint,
+                "srt_bytes": size,
+            }, ensure_ascii=False), encoding="utf-8")
+        return ep
+
+    def test_complete_episode_passes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = self.make_episode(tmp)
+            r = p.verify_episode(ep)
+            self.assertTrue(r["ok"], r)
+            self.assertEqual(r["coverage"]["missing"], 0)
+            self.assertEqual(r["cues"], 2)
+            self.assertEqual(r["body_lines"], 2)
+            self.assertTrue(r["toc_signature_ok"])
+
+    def test_dropped_tail_fails(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = self.make_episode(tmp, drop_tail=True)
+            r = p.verify_episode(ep)
+            self.assertFalse(r["ok"])
+            self.assertIn("coverage_failed", r["reasons"])
+            # 旧口径（包含检查）会放行，正是要拦的东西
+            self.assertTrue(r["coverage"]["containment_would_pass"])
+
+    def test_missing_toc_is_reported_not_crashed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = self.make_episode(tmp, with_toc=False)
+            r = p.verify_episode(ep)
+            self.assertFalse(r["ok"])
+            self.assertIn("toc_missing_or_invalid", r["reasons"])
+
+    def test_missing_dir_is_reported(self):
+        import pathlib, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            r = p.verify_episode(pathlib.Path(tmp) / "does-not-exist")
+            self.assertFalse(r["ok"])
+            self.assertIn("episode_dir_missing", r["reasons"])
+
+    def test_verify_cli_exit_codes_and_json(self):
+        import contextlib, io, json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ok_dir = self.make_episode(tmp)
+            bad_dir = self.make_episode(tmp, drop_tail=True, name="ep-bad")
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code_ok = p.cli(["verify", str(ok_dir), "--json"])
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(code_ok, p.EX_OK)
+            self.assertTrue(payload["ok"])
+            self.assertIsInstance(payload["episode"], str)
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code_bad = p.cli(["verify", str(bad_dir), "--json"])
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(code_bad, p.EX_SPLIT)
+            self.assertFalse(payload["ok"])
+
+
+class ListSubsParserTests(unittest.TestCase):
+    """真实 B 站输出回归：没登录时只有弹幕轨 + 一行 WARNING，不能被当成 found。"""
+
+    BILI_LOGIN_REQUIRED = (
+        "[BiliBili] Extracting URL: https://www.bilibili.com/video/BV1mRn66JERc/\n"
+        "[info] Available subtitles for BV1mRn66JERc:\n"
+        "Language Formats\n"
+        "danmaku  xml\n"
+        "\n"
+        "WARNING: [BiliBili] Subtitles are only available when logged in. "
+        "Use --cookies-from-browser or --cookies for the authentication.\n"
+    )
+
+    def test_warning_line_is_not_a_track(self):
+        tracks = p.parse_list_subs(self.BILI_LOGIN_REQUIRED)
+        self.assertEqual([t["lang"] for t in tracks], ["danmaku"])
+
+    def test_login_required_wins_over_danmaku(self):
+        probe = p.classify_subtitle_probe(self.BILI_LOGIN_REQUIRED, "", 0, [])
+        self.assertEqual(probe["status"], "login_required")
+        self.assertNotIn("chosen", probe)
+
+    def test_normal_track_still_parsed(self):
+        text = ("[info] Available subtitles for X:\nLanguage Formats\nzh-Hans  srt\nen  vtt\n")
+        tracks = p.parse_list_subs(text)
+        self.assertEqual([t["lang"] for t in tracks], ["zh-Hans", "en"])
+        self.assertFalse(tracks[0]["automatic"])
+
+
 if __name__ == "__main__":
     unittest.main()
